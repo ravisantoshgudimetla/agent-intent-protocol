@@ -1,0 +1,220 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: agentrequests.governance.aip.example.com
+spec:
+  group: governance.aip.example.com
+  names:
+    kind: AgentRequest
+    listKind: AgentRequestList
+    plural: agentrequests
+    shortNames:
+    - ar
+    singular: agentrequest
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.agentIdentity
+      name: Agent
+      type: string
+    - jsonPath: .spec.action
+      name: Action
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: AgentRequest is the Schema for the agentrequests API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of AgentRequest
+            properties:
+              action:
+                description: Action is the operation the agent wants to perform
+                type: string
+              agentIdentity:
+                description: AgentIdentity is the verified identifier of the agent making the request
+                type: string
+              reason:
+                description: Reason is the human-readable justification for this action
+                type: string
+              priority:
+                description: Priority hint (higher values indicate higher priority)
+                type: integer
+                minimum: 0
+              intentPlanRef:
+                description: Reference to a parent IntentPlan if part of a multi-step operation
+                type: string
+              interruptibility:
+                description: Flag indicating whether the agent can safely abort the operation if approval is revoked
+                type: boolean
+                default: false
+              cascadeModel:
+                description: Agent-provided causal model of expected downstream effects
+                properties:
+                  affectedTargets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        uri:
+                          type: string
+                        effectType:
+                          type: string
+                          enum: ["deleted", "modified", "disrupted", "orphaned"]
+                      required: ["uri", "effectType"]
+                  modelSourceTrust:
+                    type: string
+                    enum: ["authoritative", "derived", "inferred"]
+                  modelSourceID:
+                    type: string
+                required: ["affectedTargets"]
+                type: object
+              reasoningTrace:
+                description: Information detailing how the agent formulated this intent
+                properties:
+                  confidenceScore:
+                    type: number
+                    format: float
+                    minimum: 0.0
+                    maximum: 1.0
+                  componentConfidence:
+                    description: Structured mapping providing granularity
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  calibrationEvidence:
+                    type: string
+                  traceReference:
+                    type: string
+                  alternatives:
+                    type: array
+                    items:
+                      type: string
+                type: object
+              target:
+                description: Target is the resource the agent wants to operate on
+                properties:
+                  uri:
+                    description: Canonical URI for the resource (e.g. k8s://cluster/namespace/deployment/name)
+                    type: string
+                  resourceType:
+                    description: The kind of resource
+                    type: string
+                  attributes:
+                    description: Additional key-value attributes for policy matching
+                    type: object
+                    additionalProperties:
+                      type: string
+                required:
+                - uri
+                type: object
+              parameters:
+                description: Action-specific parameters
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+            required:
+            - action
+            - agentIdentity
+            - target
+            type: object
+          status:
+            description: status defines the observed state of AgentRequest
+            properties:
+              evaluatedAt:
+                description: EvaluatedAt is when the request was evaluated
+                format: date-time
+                type: string
+              opsLockAcquired:
+                description: OpsLockAcquired indicates if an OpsLock was successfully acquired
+                type: boolean
+              opsLockName:
+                description: OpsLockName is the name of the acquired OpsLock
+                type: string
+              phase:
+                description: Phase is the current state of the request
+                enum:
+                - Pending
+                - Negotiating
+                - Approved
+                - Denied
+                - Executing
+                - Completed
+                - Failed
+                type: string
+              denialResponse:
+                description: Structured denial response when state is Denied
+                properties:
+                  code:
+                    type: string
+                    enum:
+                    - POLICY_VIOLATION
+                    - LOCK_CONTENTION
+                    - LOCK_TIMEOUT
+                    - RATE_LIMITED
+                    - EVALUATION_FAILURE
+                    - IDENTITY_INVALID
+                    - PLAN_ABORTED
+                    - ACTION_NOT_PERMITTED
+                    - CASCADE_DENIED
+                    - APPROVAL_REVOKED
+                  message:
+                    type: string
+                  retryAfterSeconds:
+                    type: integer
+                type: object
+              policyEvaluations:
+                description: Detailed outcomes of SafetyPolicies applied
+                items:
+                  properties:
+                    policyID:
+                      type: string
+                    ruleName:
+                      type: string
+                    result:
+                      type: string
+                    reason:
+                      type: string
+                  required:
+                  - policyID
+                  - ruleName
+                  - result
+                  type: object
+                type: array
+              submittedAt:
+                description: SubmittedAt is when the request was created
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+

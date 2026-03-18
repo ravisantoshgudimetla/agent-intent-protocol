@@ -1,0 +1,126 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: opslocks.governance.aip.example.com
+spec:
+  group: governance.aip.example.com
+  names:
+    kind: OpsLock
+    listKind: OpsLockList
+    plural: opslocks
+    shortNames:
+    - lock
+    singular: opslock
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.targetURI
+      name: Target
+      type: string
+    - jsonPath: .spec.holder.agentIdentity
+      name: Holder
+      type: string
+    - jsonPath: .spec.expiresAt
+      name: Expires
+      type: date
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: OpsLock is the Schema for the opslocks API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of OpsLock
+            properties:
+              acquiredAt:
+                description: AcquiredAt is when the lock was acquired
+                format: date-time
+                type: string
+              expiresAt:
+                description: ExpiresAt is when the lock will automatically release
+                format: date-time
+                type: string
+              holder:
+                description: Holder identifies who owns this lock
+                properties:
+                  agentIdentity:
+                    description: AgentIdentity is the agent holding the lock
+                    type: string
+                  agentRequestRef:
+                    description: AgentRequestRef is the specific request that acquired the lock
+                    type: string
+                  swarmIdentity:
+                    description: SwarmIdentity represents the coordinator grouping this lock belongs to
+                    type: string
+                  delegatedFrom:
+                    description: Reference to a parent OpsLock if this is a delegated sub-lock
+                    type: string
+                required:
+                - agentIdentity
+                type: object
+              mode:
+                description: Lock mode (exclusive vs shared/read)
+                type: string
+                enum:
+                - Exclusive
+                - Shared
+                default: Exclusive
+              leaseDurationSeconds:
+                default: 300
+                description: LeaseDurationSeconds is how long the lock is held before auto-release
+                format: int32
+                minimum: 1
+                type: integer
+              targetURI:
+                description: Canonical Target URI this lock protects
+                type: string
+            required:
+            - holder
+            - targetURI
+            type: object
+          status:
+            description: status defines the observed state of OpsLock
+            properties:
+              phase:
+                description: Phase indicates if the lock is Active or Released
+                enum:
+                - Active
+                - Released
+                - Expired
+                type: string
+              delegatedLocks:
+                description: List of sub-locks delegated from this coordinator lock
+                type: array
+                items:
+                  type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+

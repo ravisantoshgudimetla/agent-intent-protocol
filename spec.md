@@ -6,6 +6,9 @@
 > [!WARNING]
 > **Disclaimer**: This document is currently a **Draft Proposal**, not a finalized standard. The abstractions, schemas, and workflows described herein are subject to breaking changes based on initial implementation feedback and community input. It is published to solicit review from practitioners building autonomous infrastructure agents.
 
+> [!NOTE]
+> **Independence Notice**: This specification is an independent, personal initiative. It is not affiliated with, endorsed by, or related to any current or former employer of the contributors. All content represents the personal views and efforts of the individual contributors in their personal capacity.
+
 ## 1. Introduction
 
 ### 1.1 Purpose and Scope

@@ -34,3 +34,7 @@ We welcome community feedback to refine the AIP specification. Please read [CONT
 ## License
 
 This project is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+
+## Disclaimer
+
+This project is an independent, personal initiative. It is not affiliated with, endorsed by, or related to any current or former employer of the contributors. All work here represents the personal views and efforts of the individual contributors in their personal capacity.

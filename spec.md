@@ -71,6 +71,7 @@ An implementation MAY additionally support:
 - Agent Trust Profiles — control-plane-maintained calibration history per agent identity (Section 3.7).
 - Scoped execution mode for dynamic / ReAct-style agents (Section 3.1, `executionMode: scoped`).
 - Swarm coordination and delegated authority (Section 3.3.3).
+- Pre-execution verification via the `/verify` endpoint — cooperative T2→T3 TOCTOU protection for partner SDKs (Section 4.4).
 
 ## 3. Core Abstractions
 
@@ -117,6 +118,9 @@ When an `AgentRequest` transitions to `Denied`, the control plane MUST return a 
   - `ACTION_NOT_PERMITTED`: The AgentIdentity is not authorized for the requested Action on the Target.
   - `CASCADE_DENIED`: A safety policy on a transitively affected resource caused the denial.
   - `APPROVAL_REVOKED`: The control plane revoked a previously granted approval (Extended Conformance).
+  - `STATE_DRIFTED`: The target resource's state changed between policy evaluation (T1) and human approval (T2), invalidating the evaluation context. The request must be re-submitted or re-evaluated.
+  - `SCOPE_TOO_BROAD`: The `scopeBounds.permittedTargetPatterns` would match more resources than the control plane's configured `maxLockedResources` limit, preventing safe lock acquisition (Extended Conformance, see Section 3.3).
+  - `GENERATION_MISMATCH`: A `/verify` call referenced an `EvaluationGeneration` that does not match the current generation on the `AgentRequest`, indicating the approval is stale (Extended Conformance, see Section 4.4).
 - **Message**: A human-readable explanation.
 - **PolicyResults**: An array of individual policy evaluation outcomes, each including the policy name, rule name, result, and reason.
 - **RetryAfterSeconds** (OPTIONAL): A hint indicating when the agent MAY retry the request.
@@ -142,6 +146,12 @@ Implementations MAY define additional actions using a namespaced format: `<domai
 
 Advanced planning agents may benefit from interactive refinement of a `Denied` intent rather than repeatedly submitting distinct `AgentRequests`.
 Implementations MAY introduce a `Negotiating` phase. When a request violates safety policies, rather than an immediate `Denied` transition, the control plane places the request in `Negotiating` and returns a structured list of acceptable parameter bounds (e.g., "Max replicas permitted is 5" instead of "Replicas out of bounds"). The agent MUST respond with updated parameters or explicitly abort the request. This provides a structured tight loop for LLM function-calling feedback.
+
+The control plane MUST enforce two limits on `Negotiating` phase requests:
+- **`negotiationTimeoutSeconds`** (default: 300 seconds): Wall-clock deadline from the time the request entered `Negotiating`. This does not reset per round.
+- **`maxNegotiationRounds`** (default: 5): Maximum number of parameter-update cycles the agent may submit. If the agent has not produced a policy-compliant parameter set within this many rounds, the control plane MUST transition the request to `Denied` with code `POLICY_VIOLATION`. This prevents a pathological agent from flooding the control plane with rapid parameter mutations while technically responding within the timeout.
+
+If either limit is exceeded, the control plane MUST transition the request to `Denied` with code `POLICY_VIOLATION` and release any resources held during negotiation. OpsLocks MUST NOT be acquired while a request is in `Negotiating` — lock acquisition occurs only after negotiation succeeds and the request is re-evaluated to `Approved`.
 
 #### 3.1.4 Agent Reasoning and Confidence (Extended Conformance)
 
@@ -200,6 +210,19 @@ request.spec.reasoningTrace.measuredAccuracy < 0.8
 
 Control plane implementations MUST provide an operator-configurable list of trusted evaluator public keys, expressed as a JWKS (JSON Web Key Set) endpoint or static key material. The control plane MUST NOT hard-code trusted evaluators.
 
+#### 3.1.6 AgentRequest Status Fields
+
+The control plane MUST maintain the following status fields on an `AgentRequest`:
+
+- **Phase**: The current lifecycle state (Section 3.1).
+- **Conditions**: Structured per-condition tracking (e.g., `PolicyEvaluated`, `Approved`, `RequiresApproval`).
+- **Denial**: A structured `DenialResponse` (Section 3.1.1) when the request is denied.
+- **EvaluationGeneration**: A monotonically increasing integer counter, starting at `0`, incremented each time the control plane performs a fresh policy evaluation. A value of `0` means the request has not yet been evaluated. Used by the TOCTOU protection mechanism (Section 3.6.2) to bind human approvals to a specific evaluation epoch.
+- **ControlPlaneVerification**: A snapshot of independently fetched cluster state captured at the time of policy evaluation. This persists what the control plane verified so human reviewers can compare it against the agent's declared intent. MUST include:
+  - `evaluatedStateFingerprint`: The StateFingerprint (Section 3.6.2) captured at T1. Opaque string. Never exposed to the agent.
+  - `fetchedAt`: Timestamp of when the verification was performed.
+  - Additional substrate-specific fields (e.g., replica counts, endpoint health) at the implementer's discretion.
+
 ### 3.2 SafetyPolicies
 `SafetyPolicies` define the rules the control plane MUST evaluate before an `AgentRequest` MAY transition to the `Approved` state.
 
@@ -224,6 +247,8 @@ When multiple `SafetyPolicies` match a given `Target`, the control plane MUST re
 
 In summary: Deny > RequireApproval > Log > Allow.
 
+This precedence applies **across targets as well as within a single target**. If a `SafetyPolicy` on a cascading resource evaluates to `Deny` (surfaced as `CASCADE_DENIED`) while a policy on the primary target evaluates to `RequireApproval`, the `Deny` outcome MUST win and the request MUST transition to `Denied`. A `Deny` on any target in the evaluation set — primary or cascading — cannot be overridden by human approval.
+
 #### 3.2.2 Failure Semantics
 Control planes MUST specify behavior when policy evaluation dependencies (e.g., an external metrics aggregator) fail:
 - `FailClosed` (Default): If a `SafetyPolicy` cannot be evaluated, the `AgentRequest` MUST transition to `Denied` with error code `EVALUATION_FAILURE`.
@@ -233,7 +258,13 @@ Control planes MUST specify behavior when policy evaluation dependencies (e.g., 
 When multiple agents or swarms attempt to operate concurrently, `OpsLocks` provide a mandatory synchronization mechanism to prevent conflicting actions on the same targets.
 
 - **Concurrency Control**: An `AgentRequest` with a mutating `Action` MUST successfully acquire an exclusive `OpsLock` on its `Target` before reaching the `Approved` state. Non-mutating actions (e.g., `read`) MUST NOT require an exclusive lock but MAY use shared (read) locks at the implementer's discretion (Extended Conformance).
+
+  **Read-Write Lock Interaction**: When an exclusive write lock is held on a resource, any concurrent `read` `AgentRequest` on the same resource MUST be handled as follows: if shared locks are supported (Extended Conformance), the `read` request MAY be denied with `LOCK_CONTENTION` or queued — but it MUST NOT be approved into a shared lock that grants the agent a view of state that is actively being mutated. The rationale is that a `read` action whose results feed a subsequent safety decision MUST observe a consistent, non-transitional state. Implementations supporting shared locks MUST document whether they provide snapshot-isolation reads or may observe partially-applied write state. Implementations that cannot guarantee snapshot isolation SHOULD use Deny-on-Contention for `read` requests when an exclusive lock is held.
 - **Scoped Execution Locking**: When an `AgentRequest` with `executionMode: scoped` is approved, the control plane MUST acquire OpsLocks on all resources currently matching the `scopeBounds.permittedTargetPatterns` at the moment of approval — not lazily at the moment each individual action executes. This eliminates the race window between scope approval and the first infrastructure API call. Any subsequent `AgentRequest` whose `Target` URI matches a pattern covered by an active scoped lock MUST be denied with code `LOCK_CONTENTION`, regardless of whether that exact URI was explicitly declared by the scope-holding agent. The `RetryAfterSeconds` hint SHOULD reflect the remaining `timeBoundSeconds` of the active scope.
+
+  Scoped lock acquisition MUST be **all-or-nothing (atomic)**. If the control plane successfully acquires locks on N resources but fails to acquire the lock on resource N+1, it MUST release all N previously acquired locks and deny the request with `LOCK_CONTENTION`. Partial scoped locks MUST NOT be left in place.
+
+  Control plane implementations MUST enforce a configurable `maxLockedResources` limit (default: 500) on the number of resources a single scoped `AgentRequest` may lock simultaneously. If the resolved set of matching resources exceeds this limit, the request MUST be denied with code `SCOPE_TOO_BROAD`. Operators SHOULD set patterns that target specific namespaces or resource subtrees rather than wildcards spanning an entire environment.
 
   > **Why this rule exists:** A `StateEvaluation` SafetyPolicy (e.g., "deny scale if cluster status is UPDATING") provides defense-in-depth but has a race window — the infrastructure status may not yet reflect the in-progress operation at the moment a conflicting request arrives. Scoped OpsLocks close this window by establishing the concurrency boundary at scope approval time, before any infrastructure calls are made.
 
@@ -243,7 +274,7 @@ When multiple agents or swarms attempt to operate concurrently, `OpsLocks` provi
 #### 3.3.1 Lock Contention Strategy
 The control plane MUST implement one of the following contention strategies and document which is in effect:
 - **Deny-on-Contention**: If the target is already locked, the `AgentRequest` immediately transitions to `Denied` with code `LOCK_CONTENTION`. The denial SHOULD include `RetryAfterSeconds` based on the existing lock's remaining lease.
-- **Queue-with-Timeout**: The `AgentRequest` enters a wait queue. If the lock is not acquired within a configurable `LockWaitTimeoutSeconds`, the request transitions to `Denied` with code `LOCK_TIMEOUT`.
+- **Queue-with-Timeout**: The `AgentRequest` enters a wait queue. If the lock is not acquired within a configurable `LockWaitTimeoutSeconds`, the request transitions to `Denied` with code `LOCK_TIMEOUT`. The queue MUST be ordered by `priority` descending, with submission timestamp as the tiebreaker (FIFO within same priority). This ensures high-priority emergency operations (e.g., operator-initiated incident remediation) are not blocked behind lower-priority routine work.
 
 The control plane MUST NOT allow indefinite lock waiting to prevent resource starvation.
 
@@ -271,7 +302,7 @@ Actions on resources frequently produce side effects on dependent resources (e.g
 The control plane SHOULD maintain or query a dependency graph for the managed environment (e.g., resource ownership hierarchies, service dependency maps, infrastructure topology APIs). When evaluating an `AgentRequest`, the control plane SHOULD:
 1. Resolve the set of resources that would be transitively affected by the `Action` on the `Target`.
 2. Evaluate applicable `SafetyPolicies` against each affected resource.
-3. If any affected resource would trigger a `Deny` policy, the primary `AgentRequest` SHOULD be denied. The denial response MUST include the specific cascading target(s) that caused the denial using code `CASCADE_DENIED`.
+3. If any affected resource would trigger a `Deny` policy, the primary `AgentRequest` MUST be denied. The denial response MUST include the specific cascading target(s) that caused the denial using code `CASCADE_DENIED`. A `Deny` outcome on a cascading target MUST override a `RequireApproval` outcome on the primary target — cascade safety is not subject to human override.
 
 The control plane is the **primary authority** for cascade safety. It MUST NOT depend solely on agent-provided cascade information for safety decisions.
 
@@ -312,6 +343,7 @@ An `IntentPlan` MUST contain:
 - **PlanID**: A unique identifier for the plan.
 - **AgentIdentity**: The agent (or agent swarm coordinator) that owns the plan.
 - **PlanningMode**: `static` (default) or `dynamic`. `static` means all steps are declared upfront before approval. `dynamic` means steps are submitted incrementally as the agent observes execution results (e.g., a ReAct agent that cannot enumerate all steps before starting). In `dynamic` mode, the control plane approves the plan's scope and constraints rather than the full step sequence.
+- **MaxPlanDurationSeconds**: The maximum wall-clock time the plan is permitted to be `Active`. If the plan has not reached `Completed` within this window, the control plane MUST transition it to `Aborted`, release all associated `OpsLocks`, and generate a critical-severity `AuditRecord`. This field is REQUIRED for `dynamic` plans (which have no predefined step count) and RECOMMENDED for `static` plans. There is no default — implementations MUST reject a `dynamic` plan submitted without this field.
 - **Steps**: An ordered list of `AgentRequest` references, each with:
   - **StepOrder**: The execution sequence number.
   - **AgentRequestRef**: A reference to the `AgentRequest` for this step.
@@ -333,6 +365,7 @@ When a step in an `IntentPlan` transitions to `Denied` or `Failed`:
 - If any previously `Completed` steps declared a `CompensatingAction`, the control plane MUST transition the `IntentPlan` to `RollingBack` and submit those compensating `AgentRequests` in reverse step order. Each compensating action is subject to the same policy evaluation and lock acquisition as any other `AgentRequest`.
 - If no `CompensatingAction` is declared for a completed step, the control plane MUST NOT attempt automatic rollback for that step. The `AuditRecord` MUST note which completed steps lack compensating actions.
 - If a compensating action itself fails, the control plane MUST halt the rollback, leave the `IntentPlan` in `RollingBack` state, and generate a critical-severity `AuditRecord` indicating manual intervention is required.
+- Compensating `AgentRequest` records MUST carry `isCompensating: true`. This annotation allows operators to configure `SafetyPolicy` rules that explicitly relax `TimeWindow` or `RateLimit` restrictions for rollback operations. For example, a change-freeze `TimeWindow` policy MAY declare `allowCompensating: true` to permit rollback actions during a freeze window. Without such a policy override, a compensating action is subject to full policy evaluation and may itself be denied — which is a valid operator choice but MUST be documented as a known risk when change-freeze policies are in effect alongside multi-step plans.
 - The `AuditRecord` for the aborted plan MUST include the full step history, including which steps completed, which compensating actions succeeded, and which failed.
 
 ### 3.6 Execution Monitoring (Extended Conformance)
@@ -343,7 +376,7 @@ The period between `Approved` and `Completed`/`Failed` is a critical window wher
 When execution monitoring is supported, agents MUST send periodic heartbeat signals to the control plane after transitioning an `AgentRequest` to `Executing`. The heartbeat interval MUST be configured by the control plane and communicated in the approval response.
 
 If the control plane does not receive a heartbeat within the configured interval:
-- The control plane SHOULD mark the `AgentRequest` as `Failed` with reason `HEARTBEAT_TIMEOUT`.
+- The control plane MUST mark the `AgentRequest` as `Failed` with reason `HEARTBEAT_TIMEOUT`. This is not advisory — a silent agent holding an OpsLock indefinitely blocks all other agents on that resource.
 - The associated `OpsLock` MUST be released.
 - The `AuditRecord` MUST note the heartbeat failure.
 
@@ -351,7 +384,64 @@ A heartbeat MAY include:
 - **ProgressPercent** (OPTIONAL): An estimate of execution progress (0-100).
 - **StatusMessage** (OPTIONAL): A human-readable status update.
 
-#### 3.6.2 Approval Revocation
+#### 3.6.2 TOCTOU Protection (Extended Conformance)
+
+A fundamental race condition exists in any pre-execution governance system: cluster state observed at **T1** (policy evaluation) may differ from cluster state at **T2** (human approval) or **T3** (actual execution). This is the Time-of-Check to Time-of-Use (TOCTOU) problem.
+
+AIP identifies three distinct TOCTOU windows:
+
+| Window | From | To | Risk |
+|--------|------|----|------|
+| T1→T2 | Policy evaluation | Human approves | Long window (minutes to hours). Most dangerous. |
+| T2→T3 | Human approves | Agent executes | Short window (seconds). Depends on partner execution path. |
+| Concurrent | Any point | Any point | Two agents act simultaneously on the same resource. Addressed by OpsLocks (Section 3.3). |
+
+##### StateFingerprint
+
+To detect T1→T2 drift, the control plane MUST record a **StateFingerprint** at the time of policy evaluation — an opaque string that uniquely identifies the observed state of the target resource. The fingerprint is substrate-specific:
+
+- **Kubernetes**: `resourceVersion` of the target object at evaluation time.
+- **HTTP REST resources**: `ETag` header value.
+- **Cloud provider resources**: version ID or entity tag from the provider API.
+- **Systems without native versioning**: SHA-256 of the fields used in policy evaluation.
+
+The StateFingerprint is recorded in `status.controlPlaneVerification.evaluatedStateFingerprint` alongside the other verified state. It is never exposed to the agent — the agent cannot forge or influence it.
+
+##### EvaluationGeneration
+
+The control plane MUST maintain an `EvaluationGeneration` counter in `status.evaluationGeneration`, incremented each time the control plane performs a fresh policy evaluation on the request. This counter is the **epoch** a human approval references.
+
+##### T1→T2 Re-Verification
+
+When a human reviewer approves a held request, the control plane MUST:
+
+1. Re-fetch live state for the target resource.
+2. Compute the current StateFingerprint.
+3. Compare it to `status.controlPlaneVerification.evaluatedStateFingerprint`.
+
+If the fingerprints differ:
+- The control plane MUST NOT transition the request to `Approved`.
+- The control plane MUST increment `EvaluationGeneration`.
+- The control plane MUST re-evaluate all `SafetyPolicies` against the new live state.
+- The control plane MUST emit an `AuditRecord` with event type `state.drifted`, recording both the old and new fingerprints.
+- If the new evaluation result is still `RequireApproval`, the human reviewer MUST be presented with the updated context before approving again.
+- If the new evaluation result is `Deny`, the request MUST transition to `Denied` with code `STATE_DRIFTED`.
+
+If the fingerprints match, the state is stable and the control plane proceeds with lock acquisition and the `Approved` transition as normal.
+
+##### ForGeneration Binding
+
+A `HumanApproval` decision MUST reference the `EvaluationGeneration` it was made against via a `forGeneration` field. The control plane MUST reject an approval whose `forGeneration` does not match the current `status.evaluationGeneration`. This prevents replaying a stale approval after a drift has been detected and the generation incremented.
+
+> **Why two layers?** AIP addresses TOCTOU through two complementary, independent mechanisms operating at different timescales:
+>
+> **Layer 1 — Reconcile Loop (T1→T2, non-cooperative):** The control plane re-verifies the StateFingerprint at human approval time, regardless of what the agent or partner SDK does. This handles the macroscopic window (minutes to hours) where a human pauses before approving a `RequireApproval` request. The control plane enforces this unconditionally.
+>
+> **Layer 2 — `/verify` Pre-Flight (T2→T3, cooperative, Extended Conformance):** The microscopic window between human approval and the first infrastructure API call (typically 50–500ms) is addressed by a lightweight pre-flight check. A partner SDK or MCP tool implementation SHOULD call `POST /agent-requests/{name}/verify` immediately before executing the approved action. The control plane re-fetches live state, computes the current StateFingerprint, and compares it to the fingerprint captured at evaluation time — without acquiring additional locks or changing any state. If the fingerprints match, the control plane returns a `verified: true` response and the partner proceeds. If they differ, the control plane returns `verified: false` with code `STATE_DRIFTED` and the partner MUST abort. See Section 4.4 for the full `/verify` specification.
+>
+> Both layers are complementary. Layer 1 is always enforced by the server. Layer 2 is cooperative — it relies on the partner SDK calling `/verify`. Neither is sufficient alone for all threat models; together they close the full TOCTOU surface.
+
+#### 3.6.3 Approval Revocation
 The control plane MAY revoke a previously granted `Approved` status if conditions change after approval but before completion — for example, if a new `SafetyPolicy` is deployed that would deny the in-progress action, or if an operator manually intervenes.
 
 When revoking an approval:
@@ -392,12 +482,14 @@ calibrationError = mean(|claimed_confidenceScore_i - actual_outcome_i|)
 
 An agent that consistently claims `0.95` confidence but succeeds only 60% of the time has a `calibrationError` of `0.35` — measurably dishonest or poorly calibrated.
 
+> **Scope Note:** `Denied` requests are intentionally excluded from `calibrationError` calculations. A `Denied` outcome means the governance system worked correctly — the agent's intent was intercepted before execution. It does not mean the agent's execution was poor. Including `Denied` in the outcome would penalize agents operating in environments with strict policies and conflate governance effectiveness with agent reliability. Implementers should be aware that a sophisticated agent could exploit this by submitting high-confidence requests it expects to be `Denied` (not counted) while only submitting requests it is certain will succeed. The `AgentTrustProfile` is complementary to — not a replacement for — transport-layer RBAC controls that restrict which actions an agent may even submit.
+
 #### 3.7.2 Control Plane Update Semantics
 
 The control plane MUST update the `AgentTrustProfile` whenever an `AgentRequest` transitions to a terminal state (`Completed` or `Failed`). The update MUST:
 
 1. Increment `totalRequests`
-2. Update `successRate` using an exponential moving average (EMA) with a configurable decay factor (default: α = 0.1)
+2. Update `successRate` using an exponential moving average (EMA) with a configurable decay factor α. The default α = 0.1 is conservative (slow to adapt, ~22 requests to reflect a step change in agent behavior). For high-risk targets where rapid detection of agent degradation is required, operators SHOULD configure α ≥ 0.3 via the `SafetyPolicy` or control plane configuration. The decay factor MUST be operator-configurable and MUST NOT be hardcoded.
 3. If the terminal request included a `ReasoningTrace.ConfidenceScore`, update `calibrationError` and `calibrationDrift`
 4. Set `lastUpdated` to the current timestamp
 
@@ -415,7 +507,7 @@ agent.calibrationError > 0.3
 agent.calibrationDrift > 0.1 && request.spec.target.uri.startsWith("k8s://prod")
 
 # Only allow autonomous prod deploys from agents with proven track records
-agent.successRate < 0.85 && request.spec.action == "deploy"
+agent.successRate < 0.85 && request.spec.target.uri.startsWith("k8s://prod")
 ```
 
 These expressions evaluate the agent's historical behavior as a first-class governance input — independent of anything the agent self-reports on the current request.
@@ -444,6 +536,10 @@ Agents MAY interact with the control plane via:
 2. **gRPC**: Utilizing defined protobuf schemas for low-latency streaming.
 3. **Platform-Specific APIs**: e.g., platform-native resource APIs with webhook or admission control mechanisms.
 
+### 4.1.1 Consistency Requirements
+
+OpsLock acquisition MUST be **linearizable** — the control plane MUST guarantee that at most one `AgentRequest` can successfully acquire an exclusive lock on a given `Target` URI at any point in time, even under concurrent submissions from multiple agents or across multiple control plane replicas. Implementations MUST use a consensus-backed store (e.g., etcd, ZooKeeper, or a database offering serializable transactions) as the backing store for OpsLock state. Control plane implementations that cannot provide this guarantee MUST document the consistency model in use and MUST emit a warning-severity `AuditRecord` for every lock acquisition, noting the weaker consistency guarantee.
+
 ### 4.2 Required Operations
 The Control Plane MUST provide a mechanism for Agents to:
 - Submit an `AgentRequest`.
@@ -454,10 +550,88 @@ The Control Plane MUST provide a mechanism for Agents to:
 ### 4.3 Version Negotiation
 The Control Plane MUST expose the AIP specification version(s) it supports (e.g., via a `/version` endpoint or capability discovery mechanism). Agents SHOULD verify compatibility before submitting requests. The Control Plane MUST reject requests referencing an unsupported AIP version with a clear error.
 
-### 4.4 Simulation and Dry-Runs (Extended Conformance)
-Advanced planning agents (such as tree-of-thought or ReAct frameworks) benefit from evaluating alternatives before committing to a plan. 
+### 4.4 Pre-Execution Verification — `/verify` (Extended Conformance)
+
+The `/verify` endpoint closes the T2→T3 TOCTOU window cooperatively. Partner SDKs and MCP tool implementations SHOULD call it immediately before issuing the infrastructure API call for an approved `AgentRequest`.
+
+#### 4.4.1 Request
+
+```
+POST /agent-requests/{name}/verify
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `forGeneration` | integer | REQUIRED | The `EvaluationGeneration` the approval was issued against. Binds the verify call to a specific evaluation epoch. |
+| `namespace` | string | OPTIONAL | Namespace of the `AgentRequest`. Defaults to `default`. |
+
+#### 4.4.2 Semantics
+
+The control plane MUST reject `/verify` calls on requests that are not in the `Approved` phase. The response MUST return HTTP 409 Conflict with a structured error:
+
+```json
+{ "error": "INVALID_PHASE", "message": "AgentRequest is not in Approved phase.", "currentPhase": "Pending" }
+```
+
+This prevents partner SDKs from accidentally calling `/verify` on a request still awaiting approval, and prevents agents from probing the StateFingerprint comparison behavior on non-actionable requests.
+
+The control plane MUST:
+1. Re-fetch the current live state of the `AgentRequest`'s `Target` resource.
+2. Compute the current StateFingerprint for that resource.
+3. Compare it to `status.controlPlaneVerification.evaluatedStateFingerprint`.
+4. Verify the `forGeneration` field matches `status.evaluationGeneration`.
+
+The control plane MUST NOT:
+- Acquire or release any `OpsLocks`.
+- Change the `AgentRequest` phase or any status field.
+- Generate an `AuditRecord` on a successful verify (to avoid log noise for high-frequency callers). A failed verify MUST generate an `AuditRecord` with event `state.drifted.verify`, not `state.drifted` — the two events represent different TOCTOU windows and MUST be distinguishable in the audit log.
+- Expose the raw `StateFingerprint` value in the response. The response MUST return only `verified: true/false`, the denial code, and the current `evaluationGeneration`. The raw fingerprint MUST NOT be included — it is an internal control plane value never exposed to agents or partner SDKs.
+
+#### 4.4.3 Response
+
+**Verified (fingerprints match, generation matches):**
+```json
+{
+  "verified": true,
+  "agentRequestName": "my-agent-abc123",
+  "evaluationGeneration": 1
+}
+```
+The partner SHOULD proceed with the infrastructure API call immediately after receiving this response.
+
+**Drifted (fingerprints differ or generation mismatch):**
+```json
+{
+  "verified": false,
+  "code": "STATE_DRIFTED",
+  "message": "Target state changed since policy evaluation. Re-submit the AgentRequest.",
+  "evaluationGeneration": 2
+}
+```
+The partner MUST abort the infrastructure API call and SHOULD surface the drift to the agent runtime for re-planning.
+
+**Stale approval (forGeneration does not match current evaluationGeneration):**
+```json
+{
+  "verified": false,
+  "code": "GENERATION_MISMATCH",
+  "message": "Approval was issued against generation 1 but current generation is 2.",
+  "evaluationGeneration": 2
+}
+```
+
+#### 4.4.4 Latency Contract
+
+Because `/verify` sits in the hot path between approval and infrastructure execution, implementations MUST complete the check within a configurable `verifyTimeoutMs` (default: 200ms). If the control plane cannot complete verification within this window (e.g., the backing store is degraded), it MUST return an error response with code `EVALUATION_FAILURE`. The partner MUST treat an unresponsive or errored `/verify` as a failed check and abort, consistent with FailClosed semantics.
+
+> **Design analogy:** `/verify` is to AIP what `iam:SimulatePrincipalPolicy` is to AWS — a lightweight, read-only pre-flight that gives the caller high confidence the action is still safe to execute at T3, without the overhead of a full policy re-evaluation cycle. The key distinction from a full re-evaluation is that `/verify` only checks state freshness (StateFingerprint); it does not re-run `SafetyPolicy` expressions. Full policy re-evaluation is the control plane's job at T1 and T2; `/verify` guards against the narrow window of state mutation between human approval and execution.
+
+### 4.5 Simulation and Dry-Runs (Extended Conformance)
+Advanced planning agents (such as tree-of-thought or ReAct frameworks) benefit from evaluating alternatives before committing to a plan.
 
 Implementers MAY provide an endpoint allowing an Agent to submit a "what-if" `AgentRequest` or `IntentPlan` for synchronous simulated evaluation. The control plane MUST evaluate policies based on the immediate real-time state, but MUST NOT acquire `OpsLocks` or change actual records. The response MUST return a simulated `Approved` or `Denied` result.
+
+> **Note:** Simulation (§4.5) and Pre-Execution Verification (§4.4) serve different purposes. Simulation is for planning — an agent asks "would this be approved?" before it has any approval. Verification is for safety — a partner SDK asks "is this approval still valid?" immediately before executing. Do not conflate them.
 
 ## 5. Observability and Integration
 
@@ -475,6 +649,12 @@ An `AuditRecord` MUST include:
 
 Audit logs SHOULD be exportable to standard SIEM (Security Information and Event Management) systems.
 
+#### 5.1.1 Retention and Garbage Collection
+
+`AgentRequest` records in terminal states (`Completed`, `Failed`, `Denied`) and their associated `AuditRecord` entries MUST be retained for a minimum configurable retention period (default: **365 days**) to satisfy audit and incident forensics requirements. After the retention period, implementations MAY garbage-collect terminal-state records. The retention period MUST be operator-configurable and MUST be documented. Operators in regulated industries SHOULD configure longer retention per applicable compliance requirements: SOC 2 Type II and PCI-DSS 10.7 require a minimum of 1 year; FedRAMP requires 3 years; HIPAA requires 6 years. The 365-day default satisfies SOC 2 and PCI-DSS out of the box.
+
+Implementations MUST NOT garbage-collect `AuditRecord` entries independently of their parent `AgentRequest` — the two MUST be retained for the same duration to preserve a coherent audit trail. Active records (`Pending`, `Approved`, `Executing`, `Negotiating`) MUST NOT be garbage-collected.
+
 ### 5.2 Standards Alignment
 Implementations SHOULD leverage existing industry observability standards:
 - **CloudEvents**: `AuditRecords` SHOULD be expressible as CloudEvents for interoperable event routing.
@@ -488,7 +668,7 @@ To prevent spoofing and ensure accountability, agents MUST authenticate with the
 - **Identity Verification**: The Control Plane MUST extract and verify the `AgentIdentity` from the transport layer (e.g., mTLS certificates, OIDC tokens, SPIFFE SVIDs).
 - Agents MUST NOT be permitted to arbitrarily assert an `AgentIdentity` within the `AgentRequest` payload without corresponding transport-layer cryptographic validation.
 - The Control Plane SHOULD support binding `SafetyPolicies` to specific `AgentIdentity` values or groups, enabling per-agent or per-team policy scoping.
-- **Composite Identity for Managed Platforms**: On managed agent platforms (e.g., AWS Bedrock, Azure AI Agent Service), the transport-layer credential identifies the executing infrastructure principal (e.g., a Lambda execution role ARN, an Azure Managed Identity) — not the specific AI agent or workflow. Multiple distinct AI agents may share the same infrastructure principal. In these environments, the `AgentIdentity` SHOULD be a composite of the executing principal and an AI tenant identifier (e.g., Bedrock Agent ID, Azure AI Agent name) passed as a verified claim within the auth token or request context. The Control Plane MUST use the composite identity — not the infrastructure principal alone — as the unit for policy binding, OpsLock ownership, and audit attribution.
+- **Composite Identity for Managed Platforms**: On managed agent platforms (e.g., AWS Bedrock, Azure AI Agent Service), the transport-layer credential identifies the executing infrastructure principal (e.g., a Lambda execution role ARN, an Azure Managed Identity) — not the specific AI agent or workflow. Multiple distinct AI agents may share the same infrastructure principal. In these environments, the `AgentIdentity` MUST be a composite of the executing principal and an AI tenant identifier (e.g., Bedrock Agent ID, Azure AI Agent name). The AI tenant identifier MUST be carried as a verified claim in the transport-layer auth token — for example, as a custom JWT claim (`aip_agent_id`) in an OIDC token, or as a request-context header validated via a platform-specific sidecar (e.g., an AWS Lambda extension that injects and signs the Bedrock Agent ID). The Control Plane MUST verify this claim before constructing the composite identity — accepting an unverified agent ID from the request payload alone is insufficient and MUST be treated as `IDENTITY_INVALID`. The Control Plane MUST use the composite identity — not the infrastructure principal alone — as the unit for policy binding, OpsLock ownership, and audit attribution.
 
 ## 7. Security Considerations
 
@@ -496,7 +676,7 @@ To prevent spoofing and ensure accountability, agents MUST authenticate with the
 - **Priority Inflation**: Agents may attempt to bypass queueing by asserting artificially high `Priority` values. The control plane MUST treat `Priority` strictly as a hint and SHOULD enforce maximum priority bounds per `AgentIdentity` (e.g., via RBAC) to prevent lower-tier agents from starving out legitimate critical operations.
 - **Lock Starvation**: Malicious or misconfigured agents could starve others by repeatedly acquiring locks. Implementations MUST enforce `LeaseDuration` limits and SHOULD implement per-agent lock quotas.
 - **Policy Tampering**: `SafetyPolicies` define the security boundary. The control plane MUST restrict creation and modification of `SafetyPolicies` to privileged administrators. Audit records MUST capture policy changes.
-- **Replay Attacks**: Each `AgentRequest` MUST be uniquely identifiable. The control plane SHOULD reject duplicate request IDs to prevent replay attacks.
+- **Replay Attacks**: Each `AgentRequest` MUST be uniquely identifiable. The control plane MUST reject duplicate request IDs within a configurable deduplication window (default: 24 hours). Implementations MUST document the window duration. In distributed control plane deployments, the deduplication store MUST be shared across all replicas — per-replica deduplication is insufficient and MUST NOT be used.
 - **Denial of Service**: The control plane SHOULD implement rate limiting on `AgentRequest` submission per `AgentIdentity` to prevent resource exhaustion.
 - **Cascade Model Poisoning**: An agent could submit a deliberately misleading `CascadeModel` to distract or overwhelm the control plane. The control plane MUST NOT trust agent-asserted cascade information for safety decisions when its own dependency graph is available (Section 3.4.1).
 
@@ -510,6 +690,7 @@ The lifecycle of an agent's operation MUST proceed as follows:
 4. **Cascade Evaluation** (if supported): The control plane resolves the dependency graph for the target resource and evaluates safety policies against transitively affected resources (Section 3.4).
 5. **Concurrency Acquisition**: The control plane attempts to assign an `OpsLock` on the target to the requesting agent, following the configured contention strategy (Section 3.3.1).
 6. **Approval**: Upon safety verification and lock acquisition, the `AgentRequest` transitions to `Approved`.
+6.5. **Pre-Execution Verification** (Extended Conformance): Immediately before issuing the infrastructure API call, the partner SDK or MCP tool SHOULD call `POST /agent-requests/{name}/verify` with the `forGeneration` value from the approval epoch (Section 4.4). If the control plane returns `verified: false` (code `STATE_DRIFTED` or `GENERATION_MISMATCH`), the partner MUST abort the infrastructure call and SHOULD surface the event to the agent runtime for re-planning. A `state.drifted.verify` `AuditRecord` is emitted. If the control plane returns `verified: true`, the partner proceeds immediately.
 7. **Execution**: The agent performs the action against the target system. If execution monitoring is enabled (Section 3.6), the agent transitions the request to `Executing` and begins sending heartbeats.
 8. **Completion/Release**: The agent signals success or failure. The control plane updates the `AgentRequest` to `Completed` or `Failed`, generates final audit records, and explicitly releases the associated `OpsLock`.
 
@@ -525,16 +706,24 @@ To ensure interoperability between independently developed agents and control pl
   "title": "AgentRequest",
   "type": "object",
   "required": ["apiVersion", "kind", "id", "agentIdentity", "target", "reason"],
-  "if": {
-    "properties": { "executionMode": { "const": "single" } },
-    "required": ["executionMode"]
-  },
-  "then": {
-    "required": ["action"]
-  },
-  "else": {
-    "comment": "When executionMode is scoped, action is omitted — scopeBounds.permittedActions replaces it."
-  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "executionMode": { "const": "single" } },
+        "required": ["executionMode"]
+      },
+      "then": { "required": ["action"] },
+      "else": { "comment": "When executionMode is scoped, action is omitted — scopeBounds.permittedActions replaces it." }
+    },
+    {
+      "if": {
+        "properties": { "executionMode": { "const": "scoped" } },
+        "required": ["executionMode"]
+      },
+      "then": { "required": ["scopeBounds"] },
+      "else": { "comment": "scopeBounds is only required when executionMode is scoped." }
+    }
+  ],
   "properties": {
     "apiVersion": {
       "type": "string",
@@ -593,6 +782,11 @@ To ensure interoperability between independently developed agents and control pl
       "default": false,
       "description": "Declares whether the agent runtime can safely abort mid-execution if approval is revoked. See Section 3.6.2."
     },
+    "isCompensating": {
+      "type": "boolean",
+      "default": false,
+      "description": "True if this AgentRequest was submitted as a compensating (rollback) action for a failed IntentPlan step. Allows SafetyPolicy rules with allowCompensating: true to relax TimeWindow or RateLimit restrictions during rollback. Set by the control plane when submitting compensating actions — agents MUST NOT set this field directly."
+    },
     "executionMode": {
       "type": "string",
       "enum": ["single", "scoped"],
@@ -631,6 +825,26 @@ To ensure interoperability between independently developed agents and control pl
       "type": "object",
       "description": "Action-specific parameters (e.g., {\"replicas\": 5} for scale, {\"config\": {...}} for update).",
       "additionalProperties": true
+    },
+    "humanApproval": {
+      "type": "object",
+      "description": "Written by a human reviewer when a policy requires manual approval. The control plane drives the state machine when this field is set.",
+      "required": ["decision", "forGeneration"],
+      "properties": {
+        "decision": {
+          "type": "string",
+          "enum": ["approved", "denied"],
+          "description": "The reviewer's explicit decision."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Optional free-text justification."
+        },
+        "forGeneration": {
+          "type": "integer",
+          "description": "The EvaluationGeneration this decision was made against. The control plane MUST reject the approval if this does not match status.evaluationGeneration, preventing replay of stale approvals after a state.drifted event."
+        }
+      }
     }
   },
   "$defs": {
@@ -772,6 +986,11 @@ To ensure interoperability between independently developed agents and control pl
             "type": "object",
             "description": "Type-specific configuration. Schema depends on the rule type.",
             "additionalProperties": true
+          },
+          "allowCompensating": {
+            "type": "boolean",
+            "default": false,
+            "description": "If true, this rule is bypassed when the AgentRequest carries isCompensating: true. Intended for TimeWindow and RateLimit rules that should not block rollback operations during change freezes. MUST NOT be set on Deny rules — safety Deny rules apply to compensating actions unconditionally."
           }
         }
       }
@@ -781,6 +1000,12 @@ To ensure interoperability between independently developed agents and control pl
       "enum": ["FailClosed", "FailOpen"],
       "default": "FailClosed",
       "description": "Behavior when policy evaluation dependencies are unreachable."
+    },
+    "cascadeDepth": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 3,
+      "description": "Maximum number of dependency hops the control plane will traverse when evaluating cascade effects for targets matching this policy. A value of 0 disables cascade evaluation for this policy. MUST be explicitly documented by the implementation."
     }
   }
 }
@@ -831,12 +1056,15 @@ To ensure interoperability between independently developed agents and control pl
         "plan.activated",
         "plan.completed",
         "plan.aborted",
+        "plan.timeout",
         "plan.rolling_back",
         "policy.evaluated",
         "cascade.mismatch",
-        "heartbeat.timeout"
+        "heartbeat.timeout",
+        "state.drifted",
+        "state.drifted.verify"
       ],
-      "description": "The specific event that generated this record."
+      "description": "The specific event that generated this record. Use `state.drifted` for T1→T2 drift detected at human approval time; use `state.drifted.verify` for T2→T3 drift detected by a `/verify` call."
     },
     "phaseTransition": {
       "type": "object",
@@ -971,6 +1199,11 @@ To ensure interoperability between independently developed agents and control pl
       "default": "static",
       "description": "static: all steps declared upfront, validated via forward state simulation before approval. dynamic: steps submitted incrementally as agent observes results (e.g., ReAct); control plane approves scope and constraints, not the full step sequence."
     },
+    "maxPlanDurationSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Maximum wall-clock seconds the plan may remain Active. REQUIRED for dynamic plans; RECOMMENDED for static plans. The control plane MUST abort the plan and release all OpsLocks if this duration is exceeded."
+    },
     "steps": {
       "type": "array",
       "items": {
@@ -1061,11 +1294,14 @@ To ensure interoperability between independently developed agents and control pl
 }
 ```
 
-The following additional event type MUST be supported in `AuditRecord.event` when `AgentTrustProfile` is implemented:
+The following additional event types MUST be supported in `AuditRecord.event` when the corresponding Extended Conformance feature is implemented:
 
-| Event | Trigger |
-|-------|---------|
-| `agent.trustprofile.updated` | Emitted whenever an `AgentTrustProfile` is recalculated after a terminal `AgentRequest` transition |
+| Event | Feature | Trigger |
+|-------|---------|---------|
+| `plan.timeout` | IntentPlan max duration (Section 3.5) | Emitted when the control plane aborts a plan because `maxPlanDurationSeconds` was exceeded. Distinct from `plan.aborted` (which is emitted when a step fails). The `details` field MUST include `planID`, `maxPlanDurationSeconds`, and `elapsedSeconds`. |
+| `state.drifted` | TOCTOU Protection — T1→T2 (Section 3.6.2) | Emitted when the StateFingerprint at **human approval time** differs from the fingerprint captured at policy evaluation time. The `details` field MUST include `previousFingerprint`, `currentFingerprint`, `evaluationGeneration`, and `"window": "T1T2"`. |
+| `state.drifted.verify` | TOCTOU Protection — T2→T3 (Section 4.4) | Emitted when a `/verify` call detects that the StateFingerprint has changed between human approval and the partner SDK's pre-execution check. The `details` field MUST include `previousFingerprint`, `currentFingerprint`, `evaluationGeneration`, and `"window": "T2T3"`. |
+| `agent.trustprofile.updated` | AgentTrustProfile (Section 3.7) | Emitted whenever an `AgentTrustProfile` is recalculated after a terminal `AgentRequest` transition |
 
 ## 10. Future Considerations
 

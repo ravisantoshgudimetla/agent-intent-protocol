@@ -133,12 +133,53 @@ spec:
                 required:
                 - uri
                 type: object
+              executionMode:
+                description: Execution mode — single (one discrete action) or scoped (bounded multi-action envelope)
+                type: string
+                enum:
+                - single
+                - scoped
+                default: single
+              scopeBounds:
+                description: Required when executionMode is scoped; defines the permitted execution envelope
+                type: object
+                properties:
+                  permittedActions:
+                    description: Allowlist of action verbs the agent may invoke within this scope
+                    type: array
+                    items:
+                      type: string
+                    minItems: 1
+                  permittedTargetPatterns:
+                    description: Glob patterns restricting which target URIs the agent may touch
+                    type: array
+                    items:
+                      type: string
+                    minItems: 1
+                  timeBoundSeconds:
+                    description: Wall-clock seconds after which the scope expires and all OpsLocks are released
+                    type: integer
+                    format: int32
+                    minimum: 1
+                  maxLockedResources:
+                    description: Cap on the number of OpsLocks the control plane will acquire (default 500); SCOPE_TOO_BROAD if exceeded
+                    type: integer
+                    format: int32
+                    minimum: 1
+                    default: 500
+                required:
+                - permittedActions
+                - permittedTargetPatterns
+                - timeBoundSeconds
+              isCompensating:
+                description: Set by the control plane only; marks this request as a compensating (rollback) action. Rules with allowCompensating=true are bypassed for compensating requests.
+                type: boolean
+                default: false
               parameters:
                 description: Action-specific parameters
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
             required:
-            - action
             - agentIdentity
             - target
             type: object
@@ -146,14 +187,18 @@ spec:
             description: status defines the observed state of AgentRequest
             properties:
               evaluatedAt:
-                description: EvaluatedAt is when the request was evaluated
+                description: EvaluatedAt is when the request was last evaluated by the control plane
                 format: date-time
                 type: string
+              evaluationGeneration:
+                description: Monotonically increasing counter incremented on each fresh policy evaluation. humanApproval.forGeneration must match this value.
+                format: int64
+                type: integer
               opsLockAcquired:
                 description: OpsLockAcquired indicates if an OpsLock was successfully acquired
                 type: boolean
               opsLockName:
-                description: OpsLockName is the name of the acquired OpsLock
+                description: OpsLockName is the name of the acquired OpsLock (single mode) or comma-separated list (scoped mode)
                 type: string
               phase:
                 description: Phase is the current state of the request
@@ -166,8 +211,32 @@ spec:
                 - Completed
                 - Failed
                 type: string
+              humanApproval:
+                description: Human approval decision (set by control plane upon receiving out-of-band approval)
+                type: object
+                properties:
+                  decision:
+                    description: Approve or Deny
+                    type: string
+                    enum:
+                    - Approve
+                    - Deny
+                  forGeneration:
+                    description: The evaluationGeneration this approval is bound to. MUST match status.evaluationGeneration or the approval is rejected as stale.
+                    type: integer
+                    format: int64
+                  approver:
+                    description: Identity of the human who approved (email, username, or SSO subject)
+                    type: string
+                  timestamp:
+                    description: When the approval decision was recorded
+                    type: string
+                    format: date-time
+                required:
+                - decision
+                - forGeneration
               denialResponse:
-                description: Structured denial response when state is Denied
+                description: Structured denial response when phase is Denied
                 properties:
                   code:
                     type: string
@@ -182,6 +251,10 @@ spec:
                     - ACTION_NOT_PERMITTED
                     - CASCADE_DENIED
                     - APPROVAL_REVOKED
+                    - STATE_DRIFTED
+                    - SCOPE_TOO_BROAD
+                    - APPROVAL_STALE
+                    - INVALID_PHASE
                   message:
                     type: string
                   retryAfterSeconds:

@@ -81,6 +81,10 @@ spec:
                       - TimeWindow
                       - RateLimit
                       type: string
+                    allowCompensating:
+                      description: When true, this rule is bypassed for requests marked isCompensating=true (rollbacks). Has no effect on Deny rules — Deny is never bypassable.
+                      type: boolean
+                      default: false
                   required:
                   - action
                   - name
@@ -88,6 +92,12 @@ spec:
                   type: object
                 minItems: 1
                 type: array
+              cascadeDepth:
+                description: Maximum transitive cascade evaluation hops (default 3). Set to 0 to disable cascade evaluation for this policy.
+                type: integer
+                format: int32
+                minimum: 0
+                default: 3
               targetSelector:
                 description: TargetSelector determines which resources this policy applies to
                 properties:

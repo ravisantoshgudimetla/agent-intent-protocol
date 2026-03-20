@@ -1,0 +1,56 @@
+# Example: Compensating (rollback) AgentRequest
+#
+# After a failed deployment was denied by AIP policy, the orchestration layer
+# submits a compensating request to roll the service back to its last known-good
+# state.  The control plane sets isCompensating=true — agents MUST NOT set this
+# field themselves.  SafetyPolicy rules with allowCompensating=true (e.g.
+# change-freeze TimeWindow rules) are bypassed so that rollbacks are never
+# blocked by the same policies that blocked the bad deployment.
+#
+# Note: Deny rules are NEVER bypassed, even for compensating requests.  A
+# compensating action that itself violates a hard safety invariant is still denied.
+---
+apiVersion: governance.aip.example.com/v1alpha1
+kind: AgentRequest
+metadata:
+  name: orchestrator-rollback-payment-api-a3c77
+  namespace: aip-system
+spec:
+  agentIdentity: deploy-orchestrator/prod
+  action: k8s/rollback-deployment
+  target:
+    uri: k8s://prod/default/deployment/payment-api
+    resourceType: k8s/Deployment
+    attributes:
+      environment: production
+      tier: critical
+  reason: >
+    Rolling back payment-api from v2.1.0 to v2.0.9.  The v2.1.0 deployment
+    (AgentRequest: kiro-coding-agent-x8q21) was denied by AIP policy due to
+    low staging confidence (0.40) and untested breakglass flag.  Rollback
+    restores the last known-good revision to recover service health.
+  priority: 95   # Rollbacks are high-priority to minimize MTTR
+  interruptibility: false
+  # isCompensating is set by the control plane — do not set in user-submitted manifests.
+  # Shown here for documentation purposes only.
+  # isCompensating: true
+  cascadeModel:
+    affectedTargets:
+      - uri: k8s://prod/default/deployment/payment-worker
+        effectType: disrupted
+      - uri: k8s://prod/default/configmap/payment-routing
+        effectType: modified
+    modelSourceTrust: authoritative
+    modelSourceID: deploy-orchestrator/v2.0
+  reasoningTrace:
+    confidenceScore: 0.97
+    componentConfidence:
+      target_identification: 0.99
+      rollback_safety: 0.97
+      downstream_impact: 0.94
+    traceReference: https://traces.deploy.internal/rollback-payment-api-20260319T150200Z
+    alternatives:
+      - "Forward-fix by deploying v2.1.1 hotfix (not yet built)"
+  parameters:
+    targetRevision: "previous"   # controller will resolve to the last stable ReplicaSet
+    originalAgentRequestRef: kiro-coding-agent-x8q21

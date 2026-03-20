@@ -1,0 +1,136 @@
+# Example: Production safety policy with cascade depth, compensating bypass,
+#          confidence gating, and change-freeze window.
+#
+# This policy guards all production Kubernetes resources.  It demonstrates:
+#
+#   1. Hard Deny   — blocks deployments with untested staging or low confidence
+#   2. TimeWindow  — enforces a Friday/weekend change freeze (bypassable for rollbacks)
+#   3. StateEval   — CEL expression gates on target URI prefix
+#   4. RateLimit   — caps deploy actions per agent per hour
+#   5. RequireApproval — low-confidence requests go to human review rather than
+#                        being auto-denied, giving humans the final word
+#
+# cascadeDepth: 3 means the policy evaluates up to 3 hops of cascading targets
+# declared in the AgentRequest.cascadeModel.affectedTargets.
+---
+apiVersion: governance.aip.example.com/v1alpha1
+kind: SafetyPolicy
+metadata:
+  name: production-guard
+  namespace: aip-system
+spec:
+  targetSelector:
+    matchAttributes:
+      environment: production
+    matchActions:
+      - k8s/deploy
+      - k8s/scale-deployment
+      - k8s/restart-deployment
+      - k8s/rollback-deployment
+      - k8s/update-configmap
+      - k8s/delete
+      - kiro/deploy
+  cascadeDepth: 3
+  failureMode: FailClosed
+  rules:
+    # -------------------------------------------------------------------------
+    # Rule 1: Hard deny — untested staging + breakglass is a double red flag.
+    # No allowCompensating here: if a compensating action also has breakglass=true
+    # with no staging test, it too is denied. Safety invariant is absolute.
+    # -------------------------------------------------------------------------
+    - name: deny-breakglass-untested
+      type: StateEvaluation
+      action: Deny
+      expression: >
+        request.spec.parameters.breakglass == true &&
+        request.spec.parameters.testedInStaging == false
+      message: >
+        Breakglass deployments must have staging validation. testedInStaging
+        must be true when breakglass is set.
+
+    # -------------------------------------------------------------------------
+    # Rule 2: Hard deny — deploying to a database namespace is always blocked.
+    # -------------------------------------------------------------------------
+    - name: deny-database-mutations
+      type: StateEvaluation
+      action: Deny
+      expression: >
+        request.spec.target.uri.contains("/namespace/databases/") ||
+        request.spec.target.uri.contains("/namespace/db-")
+      message: >
+        Direct mutations to database namespaces are prohibited via AIP.
+        Submit a DBA change request instead.
+
+    # -------------------------------------------------------------------------
+    # Rule 3: Change freeze — Friday 18:00 UTC to Monday 06:00 UTC.
+    # allowCompensating: true so that rollbacks can proceed during freeze.
+    # -------------------------------------------------------------------------
+    - name: change-freeze-weekend
+      type: TimeWindow
+      action: Deny
+      allowCompensating: true
+      config:
+        denyWindows:
+          - dayOfWeek: Friday
+            startTime: "18:00"
+            endTime: "23:59"
+            timezone: UTC
+          - dayOfWeek: Saturday
+            startTime: "00:00"
+            endTime: "23:59"
+            timezone: UTC
+          - dayOfWeek: Sunday
+            startTime: "00:00"
+            endTime: "23:59"
+            timezone: UTC
+          - dayOfWeek: Monday
+            startTime: "00:00"
+            endTime: "06:00"
+            timezone: UTC
+      message: >
+        Production changes are frozen Friday 18:00 – Monday 06:00 UTC.
+        Rollback operations are permitted during freeze.
+
+    # -------------------------------------------------------------------------
+    # Rule 4: Rate limit — max 5 deploy actions per agent identity per hour.
+    # Prevents runaway agents from flooding the production environment.
+    # allowCompensating: true so rollbacks are not rate-limited.
+    # -------------------------------------------------------------------------
+    - name: rate-limit-deployments
+      type: RateLimit
+      action: Deny
+      allowCompensating: true
+      config:
+        maxRequests: 5
+        windowSeconds: 3600
+        partitionBy: agentIdentity
+      message: >
+        Agent has exceeded 5 production deploy actions in the past hour.
+        Wait for the rate-limit window to reset or request a limit increase.
+
+    # -------------------------------------------------------------------------
+    # Rule 5: Require human approval for low-confidence requests rather than
+    # auto-denying — gives human operators the final word.
+    # allowCompensating: true so that rollbacks with low confidence (e.g. an
+    # agent unsure of the exact target revision) still get a fast approval path.
+    # -------------------------------------------------------------------------
+    - name: require-approval-low-confidence
+      type: StateEvaluation
+      action: RequireApproval
+      allowCompensating: true
+      expression: >
+        request.spec.reasoningTrace.confidenceScore < 0.70
+      message: >
+        Agent confidence score is below 0.70. A human operator must review
+        and approve this action before it can proceed.
+
+    # -------------------------------------------------------------------------
+    # Rule 6: Log all critical-tier actions for the audit trail regardless of
+    # other rule outcomes.
+    # -------------------------------------------------------------------------
+    - name: log-critical-tier-actions
+      type: StateEvaluation
+      action: Log
+      expression: >
+        request.spec.target.attributes.tier == "critical"
+      message: Logging all AIP actions against critical-tier production resources.

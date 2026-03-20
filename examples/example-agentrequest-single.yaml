@@ -1,0 +1,48 @@
+# Example: Standard single-action AgentRequest
+#
+# An SRE agent wants to restart a crashing payment-api pod in production.
+# The request declares a full cascade model (the restart will briefly disrupt
+# the payment-worker) and a reasoning trace so the policy engine can gate on
+# confidence.  The policy engine will evaluate SafetyPolicies, acquire an
+# OpsLock on the target, and either approve or require human sign-off.
+---
+apiVersion: governance.aip.example.com/v1alpha1
+kind: AgentRequest
+metadata:
+  name: sre-agent-restart-abc12
+  namespace: aip-system
+spec:
+  agentIdentity: sre-agent/prod-cluster-01
+  action: k8s/restart-deployment
+  target:
+    uri: k8s://prod/default/deployment/payment-api
+    resourceType: k8s/Deployment
+    attributes:
+      environment: production
+      tier: critical
+  reason: >
+    payment-api has had 47 OOMKills in the past 10 minutes. P99 latency is
+    degraded. Restarting to recover from memory leak in v2.0.9.
+  priority: 80
+  interruptibility: true
+  cascadeModel:
+    affectedTargets:
+      - uri: k8s://prod/default/deployment/payment-worker
+        effectType: disrupted
+      - uri: k8s://prod/default/service/payment-api
+        effectType: disrupted
+    modelSourceTrust: authoritative
+    modelSourceID: static-analysis/v1.2
+  reasoningTrace:
+    confidenceScore: 0.91
+    componentConfidence:
+      anomaly_detection: 0.97
+      root_cause_attribution: 0.88
+      remediation_selection: 0.91
+    traceReference: https://traces.sre.internal/restart-payment-api-20260319T142300Z
+    alternatives:
+      - "Scale out horizontally instead of restarting (risk: OOM persists)"
+      - "Wait for automatic VPA adjustment (ETA: ~20min, too slow)"
+  parameters:
+    strategy: RollingRestart
+    maxUnavailable: "1"

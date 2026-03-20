@@ -1,0 +1,70 @@
+# Example: Scoped multi-action AgentRequest
+#
+# An auto-remediation agent is given a bounded execution envelope to triage
+# and fix a cascading latency incident in the CN region. Rather than declaring
+# a single action up front, it requests a scoped envelope: the control plane
+# acquires OpsLocks on all matching resources all-or-nothing at approval time,
+# and the agent may call back multiple times within the envelope.
+#
+# Key fields:
+#   executionMode: scoped     — activates scopeBounds enforcement
+#   scopeBounds               — defines the action/target/time envelope
+#   maxLockedResources        — overrides the 500-resource default cap
+#
+# The control plane will deny with SCOPE_TOO_BROAD if the number of resources
+# matching permittedTargetPatterns exceeds maxLockedResources at evaluation time.
+---
+apiVersion: governance.aip.example.com/v1alpha1
+kind: AgentRequest
+metadata:
+  name: remediation-agent-cn-incident-d7f91
+  namespace: aip-system
+spec:
+  agentIdentity: remediation-agent/cn-region
+  # action is omitted for scoped mode — the agent declares actions at call time
+  executionMode: scoped
+  scopeBounds:
+    permittedActions:
+      - k8s/scale-deployment
+      - k8s/restart-deployment
+      - k8s/update-configmap
+    permittedTargetPatterns:
+      - "k8s://prod/cn/**"
+      - "k8s://prod/default/configmap/payment-routing"
+    timeBoundSeconds: 1800   # 30-minute envelope
+    maxLockedResources: 50
+  target:
+    uri: k8s://prod/cn         # scope anchor — the region being remediated
+    resourceType: k8s/Namespace
+    attributes:
+      environment: production
+      region: cn
+  reason: >
+    CN region latency P99 spiked to 4.2s at 14:05 UTC. Root cause: payment-routing
+    ConfigMap was updated with stale CN endpoints. Requesting a 30-minute remediation
+    envelope to adjust routing config and restart affected services.
+  priority: 90
+  interruptibility: false
+  cascadeModel:
+    affectedTargets:
+      - uri: k8s://prod/cn/service/cost-explorer
+        effectType: disrupted
+      - uri: k8s://prod/cn/deployment/payment-gateway
+        effectType: disrupted
+      - uri: k8s://prod/default/configmap/payment-routing
+        effectType: modified
+    modelSourceTrust: derived
+    modelSourceID: incident-correlator/v3.1
+  reasoningTrace:
+    confidenceScore: 0.78
+    componentConfidence:
+      incident_detection: 0.95
+      root_cause_attribution: 0.78
+      scope_estimation: 0.72
+    traceReference: https://traces.remediation.internal/cn-incident-20260319T140500Z
+    alternatives:
+      - "Manual remediation by on-call (ETA: ~15min, incident already P0)"
+      - "Full region failover to US-WEST (disproportionate blast radius)"
+  parameters:
+    incidentID: INC-20260319-CN-001
+    priority: P0

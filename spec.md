@@ -252,7 +252,7 @@ This precedence applies **across targets as well as within a single target**. If
 #### 3.2.2 Failure Semantics
 Control planes MUST specify behavior when policy evaluation dependencies (e.g., an external metrics aggregator) fail:
 - `FailClosed` (Default): If a `SafetyPolicy` cannot be evaluated, the `AgentRequest` MUST transition to `Denied` with error code `EVALUATION_FAILURE`.
-- `FailOpen` (OPTIONAL, Extended Conformance): The control plane MAY permit the request, but MUST generate a critical-severity `AuditRecord` noting the evaluation failure.
+- `FailOpen` (DISCOURAGED, OPTIONAL, Extended Conformance): The control plane MAY permit the request independently, but MUST generate a critical-severity `AuditRecord` noting the evaluation failure. Allowing autonomous agents to mutate infrastructure while safety systems are down is very risky. Implementations adopting `FailOpen` SHOULD conditionally downgrade any mutating action to `RequireApproval`, ensuring human oversight is present when policy evaluation is offline.
 
 ### 3.3 OpsLocks
 When multiple agents or swarms attempt to operate concurrently, `OpsLocks` provide a mandatory synchronization mechanism to prevent conflicting actions on the same targets.
@@ -626,12 +626,17 @@ Because `/verify` sits in the hot path between approval and infrastructure execu
 
 > **Design analogy:** `/verify` is to AIP what `iam:SimulatePrincipalPolicy` is to AWS — a lightweight, read-only pre-flight that gives the caller high confidence the action is still safe to execute at T3, without the overhead of a full policy re-evaluation cycle. The key distinction from a full re-evaluation is that `/verify` only checks state freshness (StateFingerprint); it does not re-run `SafetyPolicy` expressions. Full policy re-evaluation is the control plane's job at T1 and T2; `/verify` guards against the narrow window of state mutation between human approval and execution.
 
-### 4.5 Simulation and Dry-Runs (Extended Conformance)
+### 4.5 Policy Discovery Endpoint (Extended Conformance)
+Agents operate most efficiently when they understand constraints before attempting actions. Instead of relying purely on negotiation or trial-and-error (which wastes tokens and time), implementations SHOULD provide a Discovery Endpoint (e.g., `GET /policies?target=URI`).
+
+This endpoint allows an agent to fetch the active `SafetyPolicies` for a specific Target prior to formulating an `AgentRequest`. The agent can inject these policies directly into its system prompt or reasoning chain, significantly increasing the likelihood of generating a compliant request on the first attempt.
+
+### 4.6 Simulation and Dry-Runs (Extended Conformance)
 Advanced planning agents (such as tree-of-thought or ReAct frameworks) benefit from evaluating alternatives before committing to a plan.
 
 Implementers MAY provide an endpoint allowing an Agent to submit a "what-if" `AgentRequest` or `IntentPlan` for synchronous simulated evaluation. The control plane MUST evaluate policies based on the immediate real-time state, but MUST NOT acquire `OpsLocks` or change actual records. The response MUST return a simulated `Approved` or `Denied` result.
 
-> **Note:** Simulation (§4.5) and Pre-Execution Verification (§4.4) serve different purposes. Simulation is for planning — an agent asks "would this be approved?" before it has any approval. Verification is for safety — a partner SDK asks "is this approval still valid?" immediately before executing. Do not conflate them.
+> **Note:** Simulation (§4.6) and Pre-Execution Verification (§4.4) serve different purposes. Simulation is for planning — an agent asks "would this be approved?" before it has any approval. Verification is for safety — a partner SDK asks "is this approval still valid?" immediately before executing. Do not conflate them.
 
 ## 5. Observability and Integration
 

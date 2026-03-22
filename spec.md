@@ -83,7 +83,7 @@ An agent MUST submit an `AgentRequest` declaring the operation it intends to per
 An `AgentRequest` MUST contain:
 - **AgentIdentity**: A verifiable identifier for the requesting agent (see Section 6).
 - **Action**: The specific operation requested from the standard vocabulary (see Section 3.1.2). REQUIRED when `executionMode: single` (the default). MUST be omitted when `executionMode: scoped` — the permitted actions are declared in `scopeBounds.permittedActions` instead.
-- **Target**: A Universal Resource Identifier (URI) or strictly defined schema locating the resource the agent expects to mutate or observe.
+- **Target**: A URI locating the resource the agent expects to mutate or observe. The URI MUST conform to the requirements defined in Section 3.1.7.
 - **Reason**: A human or machine-readable justification for the intended action.
 
 An `AgentRequest` MAY contain:
@@ -141,6 +141,12 @@ AIP defines a standard set of actions for infrastructure operations. Implementat
 
 **Custom Action Extensions** (Extended Conformance):
 Implementations MAY define additional actions using a namespaced format: `<domain>/<action>` (e.g., `database.example.com/failover`, `network.example.com/drain`). Custom actions MUST declare whether they are mutating or non-mutating. The control plane MUST reject `AgentRequests` with unrecognized actions.
+
+#### 3.1.2a Action Parameters
+
+An `AgentRequest` MAY carry an action-specific `parameters` object. The `parameters` field is intentionally open — field names and types are implementation- and platform-defined, allowing the protocol to work across heterogeneous infrastructure targets without prescribing platform-specific vocabulary.
+
+The control plane MUST expose all submitted `parameters` fields in the CEL evaluation context under `request.spec.parameters.<field>`. This is the portability guarantee: policy authors can write expressions like `request.spec.parameters.replicas > 10` against whatever fields their implementation defines, and the expression will evaluate correctly.
 
 #### 3.1.3 Intent Negotiation (Extended Conformance)
 
@@ -222,6 +228,17 @@ The control plane MUST maintain the following status fields on an `AgentRequest`
   - `evaluatedStateFingerprint`: The StateFingerprint (Section 3.6.2) captured at T1. Opaque string. Never exposed to the agent.
   - `fetchedAt`: Timestamp of when the verification was performed.
   - Additional substrate-specific fields (e.g., replica counts, endpoint health) at the implementer's discretion.
+
+#### 3.1.7 Target URI Requirements
+
+A `Target` URI MUST satisfy the following requirements:
+
+- **Absolute URI**: MUST include a scheme component that identifies the target platform (e.g., `k8s`, `aws`, `azure`).
+- **Stable**: MUST resolve to the same resource for the lifetime of that resource. The URI MUST NOT change as a result of resource state changes.
+- **Unique**: MUST unambiguously identify a single resource within the control plane's scope.
+- **OpsLock key**: The control plane MUST use the URI as the canonical key for `OpsLock` acquisition. Two `AgentRequests` targeting the same URI MUST contend for the same lock.
+
+The URI format within a given scheme is implementation-defined. Platform bindings (Appendix A.2) document the conventions for specific platforms. Implementations SHOULD follow the conventions of their platform binding to ensure interoperability with policy expressions and tooling built against that binding.
 
 ### 3.2 SafetyPolicies
 `SafetyPolicies` define the rules the control plane MUST evaluate before an `AgentRequest` MAY transition to the `Approved` state.
@@ -1324,33 +1341,59 @@ The Model Context Protocol (MCP) standardizes how agents interact with tools, wh
 
 This pattern allows framework authors to adopt AIP governance without rewriting agent reasoning loops.
 
-### A.2 Target URI Conventions (Non-Normative)
+### A.2 Target URI Platform Conventions (Non-Normative)
 
-While Section 3.1 dictates that `Target.URI` formats are implementation-defined, implementations SHOULD adopt recognizable, hierarchical schemes to improve cross-platform interoperability.
+The normative URI requirements are defined in Section 3.1.7. This appendix documents the URI conventions used by known platform bindings. Implementations targeting a given platform SHOULD follow its convention to ensure interoperability with policies and tooling built against that binding.
 
-Examples of reasonable URI schemes include:
-- **Kubernetes**: `k8s://<cluster-name>/<namespace>/<kind>/<name>`
-  - *Example*: `k8s://prod-us-east/default/deployment/payment-api`
-- **AWS**: `aws://<accountId>/<region>/<service>/<resourceType>/<resourceId>`
-  - *Example*: `aws://123456789012/us-west-2/ec2/instance/i-0abcd1234efgh5678`
-- **Azure**: Valid Azure Resource Manager (ARM) IDs.
-  - *Example*: `/subscriptions/<subId>/resourceGroups/<rgName>/providers/Microsoft.Compute/virtualMachines/<vmName>`
+The [aip-k8s reference implementation](https://github.com/ravisantoshgudimetla/aip-k8s) serves as the canonical example of how URI conventions are applied in practice for the Kubernetes binding.
+
+Known platform conventions:
+- **Kubernetes**: See the aip-k8s reference implementation.
+- **AWS**, **Azure**, **bare-metal**: Conventions to be documented as bindings mature.
 
 ### A.3 Reference Bindings
 This specification is accompanied by platform-specific reference bindings that demonstrate how AIP abstractions map to concrete infrastructure platforms. These bindings are informational and not normative:
 
-- **Kubernetes Binding**: Maps AIP entities to Custom Resource Definitions (CRDs) under the `governance.aip.example.com` API group. `AgentRequest`, `SafetyPolicy`, and `OpsLock` are implemented as namespaced CRDs with status subresources. The Kubernetes binding uses ownerReferences for cascade graph resolution and label selectors for `TargetSelector` matching. *(Note: The reference implementation for this binding is housed in a separate repository.)*
+- **Kubernetes Binding**: Maps AIP entities to Custom Resource Definitions (CRDs) under the `governance.aip.io` API group. `AgentRequest`, `SafetyPolicy`, and `OpsLock` are implemented as namespaced CRDs with status subresources. The Kubernetes binding uses ownerReferences for cascade graph resolution and label selectors for `TargetSelector` matching. The reference implementation is at [github.com/ravisantoshgudimetla/aip-k8s](https://github.com/ravisantoshgudimetla/aip-k8s).
 
 Additional platform bindings (e.g., AWS, Azure, bare-metal) are expected as the specification matures.
 
 ### A.4 Conformance Testing
-A conformance test suite is planned for the next specification revision. The test suite will validate:
-- Core lifecycle: submit → evaluate → approve/deny → complete/fail.
-- FailClosed behavior when policy evaluation dependencies are unavailable.
-- OpsLock acquisition, lease expiration, and automatic release.
-- AuditRecord generation for all state transitions.
-- Denial response structure and error code correctness.
 
-Crucially, the next iteration of the test suite will emphasize **Adversarial Edge Cases**, specifically testing how the implementation behaves when encountering requests generated via known "LLM Hallucination" patterns, such as poisoned `CascadeModels` or extreme lock starvation requests.
+Conformance is verified against the [aip-k8s reference implementation](https://github.com/ravisantoshgudimetla/aip-k8s), which provides the canonical test suite. Implementations claiming AIP Core Conformance MUST pass all Core assertions below. Extended assertions apply only to the features an implementation declares support for.
 
-Implementations SHOULD self-report their conformance level (Core or Extended) and which Extended features they support.
+Implementations MUST self-report their conformance level (Core or Extended) and which Extended features they support.
+
+#### Core Conformance Assertions
+
+**AgentRequest Lifecycle**
+- [ ] A submitted `AgentRequest` transitions to `Pending` before any evaluation occurs.
+- [ ] A request that violates a `Deny` policy transitions to `Denied` with code `POLICY_VIOLATION`.
+- [ ] A request that passes all policies acquires an `OpsLock` and transitions to `Approved`.
+- [ ] A request on a locked target transitions to `Denied` with code `LOCK_CONTENTION`.
+- [ ] An agent signalling `Completed` releases the `OpsLock` and transitions to `Completed`.
+- [ ] An agent signalling `Failed` releases the `OpsLock` and transitions to `Failed`.
+
+**SafetyPolicy Evaluation**
+- [ ] A `Deny` result from any policy takes precedence over `RequireApproval` on the same request.
+- [ ] When a policy dependency is unreachable and `failureMode` is `FailClosed`, the request transitions to `Denied` with code `EVALUATION_FAILURE`.
+- [ ] `parameters` fields submitted on an `AgentRequest` are accessible in CEL expressions as `request.spec.parameters.<field>`.
+
+**OpsLocks**
+- [ ] At most one `AgentRequest` holds an exclusive lock on a given Target URI at any time.
+- [ ] A lock whose lease expires without a `Completed` or `Failed` signal is automatically released and the request transitions to `Failed`.
+
+**AuditRecords**
+- [ ] An `AuditRecord` is generated for every `AgentRequest` state transition.
+- [ ] `AuditRecord` events include the `AgentIdentity`, `Action`, `TargetURI`, and transition timestamps.
+
+**Denial Response**
+- [ ] Every `Denied` request carries a structured denial with a `code`, `message`, and `policyResults` array.
+- [ ] All denial codes defined in Section 3.1.1 are returned in the appropriate scenarios.
+
+#### Adversarial Edge Cases
+
+Conformance tests SHOULD additionally cover:
+- A poisoned `CascadeModel` that declares fewer affected targets than the control plane detects — verify the control plane evaluates the full set and emits a `cascade.mismatch` audit event.
+- Concurrent submissions from two agents targeting the same URI — verify exactly one acquires the lock and the other receives `LOCK_CONTENTION`.
+- A stale human approval (`forGeneration` mismatch) — verify the control plane rejects it.

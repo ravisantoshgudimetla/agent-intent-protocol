@@ -234,7 +234,7 @@ The control plane MUST maintain the following status fields on an `AgentRequest`
 
 A `Target` URI MUST satisfy the following requirements:
 
-- **Absolute URI**: MUST include a scheme component that identifies the target platform (e.g., `k8s`, `aws`, `azure`).
+- **Scheme-prefixed URI**: MUST include a scheme component that identifies the target platform (e.g., `k8s`, `aws`, `azure`). The scheme is AIP-specific and indicates the binding, not an IANA-registered URI scheme.
 - **Stable**: MUST resolve to the same resource for the lifetime of that resource. The URI MUST NOT change as a result of resource state changes.
 - **Unique**: MUST unambiguously identify a single resource within the control plane's scope.
 - **OpsLock key**: The control plane MUST use the URI as the canonical key for `OpsLock` acquisition. Two `AgentRequests` targeting the same URI MUST contend for the same lock.
@@ -769,7 +769,7 @@ To ensure interoperability between independently developed agents and control pl
       "properties": {
         "uri": {
           "type": "string",
-          "description": "Canonical resource identifier. Format is implementation-defined but MUST be consistent within a control plane."
+          "description": "Canonical resource identifier. MUST be a scheme-prefixed URI (e.g., k8s://..., aws://...) that is stable, unique within the control plane's scope, and used as the OpsLock key. See §3.1.7."
         },
         "resourceType": {
           "type": "string",
@@ -1364,7 +1364,7 @@ Additional platform bindings (e.g., AWS, Azure, bare-metal) are expected as the 
 
 Conformance is verified against the [aip-k8s reference implementation](https://github.com/ravisantoshgudimetla/aip-k8s), which provides the canonical test suite. Implementations claiming AIP Core Conformance MUST pass all Core assertions below. Extended assertions apply only to the features an implementation declares support for.
 
-Implementations MUST self-report their conformance level (Core or Extended) and which Extended features they support.
+Implementations SHOULD self-report their conformance level (Core or Extended) and which Extended features they support. The format and delivery mechanism for self-reporting (e.g., a `/.well-known/aip-conformance` endpoint, a CRD annotation, or a README declaration) is implementation-defined until standardized in a future revision.
 
 #### Core Conformance Assertions
 
@@ -1380,6 +1380,10 @@ Implementations MUST self-report their conformance level (Core or Extended) and 
 - [ ] A `Deny` result from any policy takes precedence over `RequireApproval` on the same request.
 - [ ] When a policy dependency is unreachable and `failureMode` is `FailClosed`, the request transitions to `Denied` with code `EVALUATION_FAILURE`.
 - [ ] `parameters` fields submitted on an `AgentRequest` are accessible in CEL expressions as `request.spec.parameters.<field>`.
+
+**Target URI**
+- [ ] A resource's URI remains identical before and after a state change (e.g., a scale event does not alter the URI).
+- [ ] No two distinct resources within the same control plane scope share a Target URI.
 
 **OpsLocks**
 - [ ] At most one `AgentRequest` holds an exclusive lock on a given Target URI at any time.

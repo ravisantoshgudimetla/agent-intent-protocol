@@ -1372,7 +1372,7 @@ Implementations SHOULD self-report their conformance level (Core or Extended) an
 - [ ] A submitted `AgentRequest` transitions to `Pending` before any evaluation occurs.
 - [ ] A request that violates a `Deny` policy transitions to `Denied` with code `POLICY_VIOLATION`.
 - [ ] A request that passes all policies acquires an `OpsLock` and transitions to `Approved`.
-- [ ] A request on a locked target transitions to `Denied` with code `LOCK_CONTENTION`.
+- [ ] A request on a locked target is either immediately denied with code `LOCK_CONTENTION` (Deny-on-Contention) or enters a wait queue and is denied with `LOCK_TIMEOUT` if the lock is not acquired within `LockWaitTimeoutSeconds` (Queue-with-Timeout), per the documented contention strategy (§3.3.1).
 - [ ] An agent signalling `Completed` releases the `OpsLock` and transitions to `Completed`.
 - [ ] An agent signalling `Failed` releases the `OpsLock` and transitions to `Failed`.
 

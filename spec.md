@@ -55,6 +55,7 @@ An implementation MUST support the following to claim AIP Core conformance:
 - `AuditRecord` generation for all `AgentRequest` state transitions.
 - Agent identity verification via the transport layer.
 - The standard `Action` vocabulary defined in Section 3.1.2.
+- Exposure of `AgentRequest` `parameters` fields in CEL evaluation context as `request.spec.parameters.<field>` (Section 3.1.2a).
 
 ### 2.2 Extended Conformance (OPTIONAL)
 An implementation MAY additionally support:
@@ -1349,7 +1350,8 @@ The [aip-k8s reference implementation](https://github.com/ravisantoshgudimetla/a
 
 Known platform conventions:
 - **Kubernetes**: See the aip-k8s reference implementation.
-- **AWS**, **Azure**, **bare-metal**: Conventions to be documented as bindings mature.
+- **AWS**, **bare-metal**: Conventions to be documented as bindings mature.
+- **Azure**: Azure Resource Manager (ARM) paths (e.g. `/subscriptions/.../resourceGroups/...`) do not satisfy §3.1.7's scheme requirement as-is. An Azure binding MUST define a proper URI scheme (e.g. `azure://`) that wraps the ARM path rather than using the path directly.
 
 ### A.3 Reference Bindings
 This specification is accompanied by platform-specific reference bindings that demonstrate how AIP abstractions map to concrete infrastructure platforms. These bindings are informational and not normative:
@@ -1388,7 +1390,7 @@ Implementations MUST self-report their conformance level (Core or Extended) and 
 - [ ] `AuditRecord` events include the `AgentIdentity`, `Action`, `TargetURI`, and transition timestamps.
 
 **Denial Response**
-- [ ] Every `Denied` request carries a structured denial with a `code`, `message`, and `policyResults` array.
+- [ ] Every `Denied` request carries a structured denial with a `code`, `message`, and `PolicyResults` array.
 - [ ] All denial codes defined in Section 3.1.1 are returned in the appropriate scenarios.
 
 #### Adversarial Edge Cases

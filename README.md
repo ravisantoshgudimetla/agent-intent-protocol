@@ -19,6 +19,10 @@ AIP requires agents to declare intent *before* acting, enabling a control plane 
 
 While application-layer interaction protocols like MCP (Model Context Protocol) govern *how* an agent discovers and uses tools, AIP governs *whether* an agent is permitted to execute an infrastructure-mutating action.
 
+## Ecosystem Overview
+
+![AIP Ecosystem Diagram](aip_ecosystem_v4.svg)
+
 ## Specification
 
 Read the full specification proposal: [spec.md](spec.md).

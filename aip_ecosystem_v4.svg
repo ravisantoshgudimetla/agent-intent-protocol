@@ -1,0 +1,231 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 660"
+     style="font-family:-apple-system,'system-ui','Segoe UI',sans-serif;">
+
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 2 L 9 5 L 0 8 z" fill="currentColor"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="680" height="660" fill="white"/>
+
+  <!-- ══════════════════════════════════════
+       AGENT RUNTIMES
+       ══════════════════════════════════════ -->
+  <text x="28" y="19"
+    style="font-size:10px;font-weight:600;letter-spacing:.08em;fill:rgba(61,61,58,.55);">AGENT RUNTIMES</text>
+
+  <!-- LangChain -->
+  <rect x="28" y="26" width="118" height="52" rx="8"
+        fill="#f0effe" stroke="#534AB7" stroke-width="1"/>
+  <text x="87" y="47" text-anchor="middle"
+    style="font-size:12px;font-weight:700;fill:#534AB7;">LangChain</text>
+  <text x="87" y="64" text-anchor="middle"
+    style="font-size:10px;fill:rgba(83,74,183,.6);">App-layer</text>
+
+  <!-- AutoGen -->
+  <rect x="154" y="26" width="118" height="52" rx="8"
+        fill="#f0effe" stroke="#534AB7" stroke-width="1"/>
+  <text x="213" y="47" text-anchor="middle"
+    style="font-size:12px;font-weight:700;fill:#534AB7;">AutoGen</text>
+  <text x="213" y="64" text-anchor="middle"
+    style="font-size:10px;fill:rgba(83,74,183,.6);">Multi-agent</text>
+
+  <!-- CrewAI -->
+  <rect x="280" y="26" width="118" height="52" rx="8"
+        fill="#f0effe" stroke="#534AB7" stroke-width="1"/>
+  <text x="339" y="47" text-anchor="middle"
+    style="font-size:12px;font-weight:700;fill:#534AB7;">CrewAI</text>
+  <text x="339" y="64" text-anchor="middle"
+    style="font-size:10px;fill:rgba(83,74,183,.6);">Role-based</text>
+
+  <!-- kagent -->
+  <rect x="406" y="26" width="118" height="52" rx="8"
+        fill="#f0effe" stroke="#534AB7" stroke-width="1"/>
+  <text x="465" y="47" text-anchor="middle"
+    style="font-size:12px;font-weight:700;fill:#534AB7;">kagent</text>
+  <text x="465" y="64" text-anchor="middle"
+    style="font-size:10px;fill:rgba(83,74,183,.6);">CNCF sandbox</text>
+
+  <!-- Custom SDK -->
+  <rect x="532" y="26" width="120" height="52" rx="8"
+        fill="#f0effe" stroke="#534AB7" stroke-width="1"/>
+  <text x="592" y="47" text-anchor="middle"
+    style="font-size:12px;font-weight:700;fill:#534AB7;">Custom SDK</text>
+  <text x="592" y="64" text-anchor="middle"
+    style="font-size:10px;fill:rgba(83,74,183,.6);">Native AIP</text>
+
+  <!-- ── Arrows: Runtime → AIP ── -->
+  <line x1="87"  y1="78" x2="87"  y2="118" color="rgba(83,74,183,.45)" stroke="rgba(83,74,183,.45)" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="213" y1="78" x2="213" y2="118" color="rgba(83,74,183,.45)" stroke="rgba(83,74,183,.45)" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="339" y1="78" x2="339" y2="118" color="rgba(83,74,183,.45)" stroke="rgba(83,74,183,.45)" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="465" y1="78" x2="465" y2="118" color="rgba(83,74,183,.45)" stroke="rgba(83,74,183,.45)" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="592" y1="78" x2="592" y2="118" color="rgba(83,74,183,.45)" stroke="rgba(83,74,183,.45)" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ══════════════════════════════════════
+       AIP CONTROL PLANE
+       ══════════════════════════════════════ -->
+  <rect x="28" y="122" width="624" height="214" rx="10"
+        fill="#e8f5e9" stroke="#0F6E56" stroke-width="0.75"/>
+
+  <!-- AIP section label (header strip) -->
+  <text x="40" y="139"
+    style="font-size:10px;font-weight:700;letter-spacing:.08em;fill:#0F6E56;">AIP CONTROL PLANE  —  platform-agnostic</text>
+  <line x1="28" y1="145" x2="652" y2="145"
+        stroke="#0F6E56" stroke-width="0.5" opacity=".25"/>
+
+  <!-- Column 1: AgentRequest (x=36 w=197) -->
+  <rect x="36" y="151" width="197" height="179" rx="6"
+        fill="white" fill-opacity=".8" stroke="#0F6E56" stroke-width=".5" stroke-opacity=".35"/>
+  <text x="134" y="170" text-anchor="middle"
+    style="font-size:12px;font-weight:700;fill:#0F6E56;">AgentRequest</text>
+  <line x1="36" y1="177" x2="233" y2="177"
+        stroke="#0F6E56" stroke-width=".5" opacity=".2"/>
+  <text x="134" y="193" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Pending → Approved</text>
+  <text x="134" y="209" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Executing → Completed</text>
+  <text x="134" y="225" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Denied / Failed</text>
+  <text x="134" y="241" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Negotiating (ext)</text>
+  <text x="134" y="257" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">IntentPlan · rollback</text>
+  <text x="134" y="273" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Scoped / ReAct mode</text>
+  <text x="134" y="289" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Heartbeat monitor</text>
+
+  <!-- Column 2: Safety policy (x=241 w=197) -->
+  <rect x="241" y="151" width="197" height="179" rx="6"
+        fill="white" fill-opacity=".8" stroke="#0F6E56" stroke-width=".5" stroke-opacity=".35"/>
+  <text x="339" y="170" text-anchor="middle"
+    style="font-size:12px;font-weight:700;fill:#0F6E56;">Safety policy</text>
+  <line x1="241" y1="177" x2="438" y2="177"
+        stroke="#0F6E56" stroke-width=".5" opacity=".2"/>
+  <text x="339" y="193" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">OPA / CEL / Rego</text>
+  <text x="339" y="209" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">FailClosed default</text>
+  <text x="339" y="225" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Deny › ApproveHuman</text>
+  <text x="339" y="241" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Cascade evaluation</text>
+  <text x="339" y="257" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">TOCTOU T1→T2→T3</text>
+  <text x="339" y="273" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Trust profiles (EMA)</text>
+  <text x="339" y="289" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">CalibrationEvidence</text>
+
+  <!-- Column 3: OpsLock + audit (x=446 w=198) -->
+  <rect x="446" y="151" width="198" height="179" rx="6"
+        fill="white" fill-opacity=".8" stroke="#0F6E56" stroke-width=".5" stroke-opacity=".35"/>
+  <text x="545" y="170" text-anchor="middle"
+    style="font-size:12px;font-weight:700;fill:#0F6E56;">OpsLock + audit</text>
+  <line x1="446" y1="177" x2="644" y2="177"
+        stroke="#0F6E56" stroke-width=".5" opacity=".2"/>
+  <text x="545" y="193" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Linearizable store</text>
+  <text x="545" y="209" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Exclusive / shared</text>
+  <text x="545" y="225" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Deadlock prevention</text>
+  <text x="545" y="241" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Swarm delegation</text>
+  <text x="545" y="257" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">mTLS / SPIFFE id</text>
+  <text x="545" y="273" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">Immutable AuditRecord</text>
+  <text x="545" y="289" text-anchor="middle" style="font-size:10px;fill:rgba(61,61,58,.8);">365-day retention</text>
+
+  <!-- ── Arrows: AIP → Observability ── -->
+  <line x1="134" y1="336" x2="134" y2="358" color="rgba(31,30,29,.35)" stroke="rgba(31,30,29,.35)" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="339" y1="336" x2="339" y2="358" color="rgba(31,30,29,.35)" stroke="rgba(31,30,29,.35)" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="545" y1="336" x2="545" y2="358" color="rgba(31,30,29,.35)" stroke="rgba(31,30,29,.35)" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ══════════════════════════════════════
+       OBSERVABILITY OUTPUT
+       ══════════════════════════════════════ -->
+  <text x="28" y="354"
+    style="font-size:10px;font-weight:600;letter-spacing:.08em;fill:rgba(61,61,58,.55);">OBSERVABILITY OUTPUT  (§5)</text>
+
+  <!-- OpenTelemetry -->
+  <rect x="28" y="362" width="200" height="50" rx="8"
+        fill="#f5f4ef" stroke="rgba(95,94,90,.4)" stroke-width="1"/>
+  <text x="128" y="382" text-anchor="middle"
+    style="font-size:12px;font-weight:600;fill:#3d3d3a;">OpenTelemetry</text>
+  <text x="128" y="399" text-anchor="middle"
+    style="font-size:10px;fill:rgba(61,61,58,.65);">Traces · metrics</text>
+
+  <!-- CloudEvents -->
+  <rect x="236" y="362" width="200" height="50" rx="8"
+        fill="#f5f4ef" stroke="rgba(95,94,90,.4)" stroke-width="1"/>
+  <text x="336" y="382" text-anchor="middle"
+    style="font-size:12px;font-weight:600;fill:#3d3d3a;">CloudEvents</text>
+  <text x="336" y="399" text-anchor="middle"
+    style="font-size:10px;fill:rgba(61,61,58,.65);">Audit log export</text>
+
+  <!-- SIEM -->
+  <rect x="444" y="362" width="208" height="50" rx="8"
+        fill="#f5f4ef" stroke="rgba(95,94,90,.4)" stroke-width="1"/>
+  <text x="548" y="382" text-anchor="middle"
+    style="font-size:12px;font-weight:600;fill:#3d3d3a;">SIEM</text>
+  <text x="548" y="399" text-anchor="middle"
+    style="font-size:10px;fill:rgba(61,61,58,.65);">SOC2 · FedRAMP · HIPAA</text>
+
+  <!-- ── Arrow + label: → Infrastructure ── -->
+  <line x1="340" y1="412" x2="340" y2="448"
+        color="rgba(31,30,29,.35)" stroke="rgba(31,30,29,.35)" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="354" y="435" text-anchor="start"
+    style="font-size:10px;fill:rgba(61,61,58,.45);">Approved action executes</text>
+
+  <!-- ══════════════════════════════════════
+       TARGET INFRASTRUCTURE
+       ══════════════════════════════════════ -->
+  <text x="28" y="456"
+    style="font-size:10px;font-weight:600;letter-spacing:.08em;fill:rgba(61,61,58,.55);">TARGET INFRASTRUCTURE  —  addressable resources with lifecycle ops</text>
+  <rect x="28" y="464" width="624" height="64" rx="10"
+        fill="#f2f1ea" stroke="rgba(95,94,90,.35)" stroke-width=".75"/>
+
+  <!-- Kubernetes -->
+  <rect x="36"  y="472" width="140" height="48" rx="6"
+        fill="white" fill-opacity=".85" stroke="rgba(95,94,90,.4)" stroke-width=".75"/>
+  <text x="106" y="492" text-anchor="middle"
+    style="font-size:12px;font-weight:600;fill:#3d3d3a;">Kubernetes</text>
+  <text x="106" y="508" text-anchor="middle"
+    style="font-size:10px;fill:rgba(61,61,58,.65);">CRDs · controllers</text>
+
+  <!-- AWS / Azure -->
+  <rect x="184" y="472" width="140" height="48" rx="6"
+        fill="white" fill-opacity=".85" stroke="rgba(95,94,90,.4)" stroke-width=".75"/>
+  <text x="254" y="492" text-anchor="middle"
+    style="font-size:12px;font-weight:600;fill:#3d3d3a;">AWS / Azure</text>
+  <text x="254" y="508" text-anchor="middle"
+    style="font-size:10px;fill:rgba(61,61,58,.65);">provider APIs · SDKs</text>
+
+  <!-- Terraform -->
+  <rect x="332" y="472" width="140" height="48" rx="6"
+        fill="white" fill-opacity=".85" stroke="rgba(95,94,90,.4)" stroke-width=".75"/>
+  <text x="402" y="492" text-anchor="middle"
+    style="font-size:12px;font-weight:600;fill:#3d3d3a;">Terraform</text>
+  <text x="402" y="508" text-anchor="middle"
+    style="font-size:10px;fill:rgba(61,61,58,.65);">plan · apply · state</text>
+
+  <!-- Bare metal -->
+  <rect x="480" y="472" width="164" height="48" rx="6"
+        fill="white" fill-opacity=".85" stroke="rgba(95,94,90,.4)" stroke-width=".75"/>
+  <text x="562" y="492" text-anchor="middle"
+    style="font-size:12px;font-weight:600;fill:#3d3d3a;">Bare metal</text>
+  <text x="562" y="508" text-anchor="middle"
+    style="font-size:10px;fill:rgba(61,61,58,.65);">REST / gRPC adapter</text>
+
+  <!-- ══════════════════════════════════════
+       EXECUTION ISOLATION (OPTIONAL)
+       ══════════════════════════════════════ -->
+  <text x="28" y="546"
+    style="font-size:10px;font-weight:600;letter-spacing:.08em;fill:rgba(61,61,58,.55);">EXECUTION ISOLATION  (OPTIONAL)</text>
+  <rect x="28" y="554" width="624" height="56" rx="10"
+        fill="#fdf0ec" stroke="#993C1D" stroke-width=".75" stroke-opacity=".5"/>
+  <text x="340" y="578" text-anchor="middle"
+    style="font-size:12px;font-weight:600;fill:#993C1D;">Platform Runtime Sandbox  (optional binding)</text>
+  <text x="340" y="596" text-anchor="middle"
+    style="font-size:10px;fill:rgba(153,60,29,.65);">gVisor · VMs · seccomp · container isolation · platform-specific binding</text>
+
+  <!-- ══════════════════════════════════════
+       LEGEND
+       ══════════════════════════════════════ -->
+  <line x1="28" y1="624" x2="652" y2="624"
+        stroke="rgba(31,30,29,.1)" stroke-width=".5"/>
+  <rect x="28"  y="634" width="11" height="11" rx="2" fill="#534AB7"/>
+  <text x="44"  y="645" style="font-size:10px;fill:rgba(61,61,58,.65);">Agent runtime</text>
+  <rect x="150" y="634" width="11" height="11" rx="2" fill="#0F6E56"/>
+  <text x="166" y="645" style="font-size:10px;fill:rgba(61,61,58,.65);">AIP control plane</text>
+  <rect x="302" y="634" width="11" height="11" rx="2" fill="#5F5E5A"/>
+  <text x="318" y="645" style="font-size:10px;fill:rgba(61,61,58,.65);">Infrastructure</text>
+  <rect x="426" y="634" width="11" height="11" rx="2" fill="#993C1D"/>
+  <text x="442" y="645" style="font-size:10px;fill:rgba(61,61,58,.65);">Exec isolation</text>
+
+</svg>

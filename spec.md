@@ -147,7 +147,13 @@ Implementations MAY define additional actions using a namespaced format: `<domai
 
 An `AgentRequest` MAY carry an action-specific `parameters` object. The `parameters` field is intentionally open — field names and types are implementation- and platform-defined, allowing the protocol to work across heterogeneous infrastructure targets without prescribing platform-specific vocabulary.
 
-The control plane MUST expose all submitted `parameters` fields in the CEL evaluation context under `request.spec.parameters.<field>`. This is the portability guarantee: policy authors can write expressions like `request.spec.parameters.replicas > 10` against whatever fields their implementation defines, and the expression will evaluate correctly.
+The control plane MUST expose all submitted `parameters` fields in the CEL evaluation context under `request.spec.parameters.<field>`. When `parameters` is absent the control plane MUST expose it as an empty map so that field-presence checks do not throw. Policy authors MUST guard optional fields with the `has()` macro before accessing them:
+
+```
+has(request.spec.parameters.replicas) && request.spec.parameters.replicas > 10
+```
+
+Unguarded field access on an absent key will produce a CEL evaluation error, which the control plane will handle according to the policy's `failureMode` (`FailClosed` → `EVALUATION_FAILURE`; `FailOpen` → approved).
 
 #### 3.1.3 Intent Negotiation (Extended Conformance)
 
@@ -1401,5 +1407,5 @@ Implementations SHOULD self-report their conformance level (Core or Extended) an
 
 Conformance tests SHOULD additionally cover:
 - A poisoned `CascadeModel` that declares fewer affected targets than the control plane detects — verify the control plane evaluates the full set and emits a `cascade.mismatch` audit event.
-- Concurrent submissions from two agents targeting the same URI — verify exactly one acquires the lock and the other receives `LOCK_CONTENTION`.
+- Concurrent submissions from two agents targeting the same URI — verify exactly one acquires the lock and the other receives `LOCK_CONTENTION` or `LOCK_TIMEOUT` (depending on the configured OpsLock strategy).
 - A stale human approval (`forGeneration` mismatch) — verify the control plane rejects it.

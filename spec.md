@@ -93,6 +93,7 @@ An `AgentRequest` MAY contain:
 - **CascadeModel**: An agent-provided causal model of expected downstream effects (see Section 3.4.2).
 - **ReasoningTrace** (Extended Conformance): Information detailing how the agent formulated this intent, including confidence scores and chain-of-thought metadata (see Section 3.1.4).
 - **Interruptibility** (Extended Conformance): A boolean flag indicating whether the agent can safely abort the operation if approval is revoked mid-execution. Defaults to `false`.
+- **Cleanup** (Extended Conformance): A webhook registration declaring how the agent wants the control plane to handle OpsLock expiry when external side effects may be in flight (see Section 3.6.4).
 - **ExecutionMode** (Extended Conformance): `single` (default) or `scoped`. `single` means the agent declares a specific, pre-known action. `scoped` means the agent operates dynamically within declared bounds — for example, a ReAct agent that reasons and acts in a loop and cannot enumerate steps upfront. When `scoped`, `ScopeBounds` MUST also be provided.
 - **ScopeBounds** (Extended Conformance, required when `executionMode: scoped`): Defines the operating envelope: permitted action types, permitted target URI patterns, and a time bound. The control plane approves the envelope, not a specific action. Individual actions taken within the scope are still evaluated against `SafetyPolicies`.
 
@@ -105,6 +106,7 @@ An `AgentRequest` lifecycle MUST track the following states:
 - `Executing`: Agent has acknowledged approval and execution is in progress (Extended Conformance, see Section 3.6).
 - `Completed`: Agent has signaled successful execution of the approved intent.
 - `Failed`: Agent has signaled failure during execution of the approved intent.
+- `Expired`: The `OpsLock` TTL elapsed before the agent signaled `Completed` or `Failed`. If a cleanup webhook is registered, the control plane transitions to `Expired` instead of `Failed` and initiates the cleanup protocol (Extended Conformance, see Section 3.6.4). Without a cleanup webhook, `Expired` is equivalent to `Failed` for lifecycle purposes.
 
 #### 3.1.1 Denial Response
 When an `AgentRequest` transitions to `Denied`, the control plane MUST return a structured denial containing:
@@ -122,6 +124,7 @@ When an `AgentRequest` transitions to `Denied`, the control plane MUST return a 
   - `STATE_DRIFTED`: The target resource's state changed between policy evaluation (T1) and human approval (T2), invalidating the evaluation context. The request must be re-submitted or re-evaluated.
   - `SCOPE_TOO_BROAD`: The `scopeBounds.permittedTargetPatterns` would match more resources than the control plane's configured `maxLockedResources` limit, preventing safe lock acquisition (Extended Conformance, see Section 3.3).
   - `GENERATION_MISMATCH`: A `/verify` call referenced an `EvaluationGeneration` that does not match the current generation on the `AgentRequest`, indicating the approval is stale (Extended Conformance, see Section 4.4).
+  - `TARGET_NOT_ENROLLED`: The `target.uri` does not correspond to any registered `GovernedResource` and the control plane is configured with `enrollmentMode: strict` (Extended Conformance, see Section 3.8).
 - **Message**: A human-readable explanation.
 - **PolicyResults**: An array of individual policy evaluation outcomes, each including the policy name, rule name, result, and reason.
 - **RetryAfterSeconds** (OPTIONAL): A hint indicating when the agent MAY retry the request.
@@ -245,6 +248,8 @@ A `Target` URI MUST satisfy the following requirements:
 - **Unique**: MUST unambiguously identify a single resource within the control plane's scope.
 - **OpsLock key**: The control plane MUST use the URI as the canonical key for `OpsLock` acquisition. Two `AgentRequests` targeting the same URI MUST contend for the same lock.
 
+> **External System Note (Extended Conformance):** When a `GovernedResource` enrollment record maps a logical `target.uri` to an `externalRef.uri` (Section 3.8), the OpsLock key MUST be the `externalRef.uri` — the physical resource being mutated — rather than the logical `target.uri`. This ensures mutual exclusion is enforced at the correct granularity. The `target.uri` remains the stable identifier used for policy matching, audit records, and human-readable display. See Section 3.8 for the full enrollment model.
+
 The URI format within a given scheme is implementation-defined. Platform bindings (Appendix A.2) document the conventions for specific platforms. Implementations SHOULD follow the conventions of their platform binding to ensure interoperability with policy expressions and tooling built against that binding.
 
 ### 3.2 SafetyPolicies
@@ -293,7 +298,7 @@ When multiple agents or swarms attempt to operate concurrently, `OpsLocks` provi
   > **Why this rule exists:** A `StateEvaluation` SafetyPolicy (e.g., "deny scale if cluster status is UPDATING") provides defense-in-depth but has a race window — the infrastructure status may not yet reflect the in-progress operation at the moment a conflicting request arrives. Scoped OpsLocks close this window by establishing the concurrency boundary at scope approval time, before any infrastructure calls are made.
 
 - **Holder**: An `OpsLock` MUST identify the `AgentIdentity` and specific `AgentRequest` that owns it.
-- **Lease Expiration**: Locks MUST define an explicit `LeaseDuration`. If the agent does not mark the request `Completed` or explicitly renew the lock within this duration, the control plane MUST automatically release the lock and transition the `AgentRequest` to `Failed` with a timeout reason.
+- **Lease Expiration**: Locks MUST define an explicit `LeaseDuration`. If the agent does not mark the request `Completed` or explicitly renew the lock within this duration, the control plane MUST automatically release the lock and transition the `AgentRequest` to `Failed` with a timeout reason. Exception: if the `AgentRequest` registered a `cleanup` webhook with `onLockExpiry: true`, the control plane MUST transition to `Expired` instead of `Failed` and follow the cleanup protocol in Section 3.6.4 before releasing the lock.
 
 #### 3.3.1 Lock Contention Strategy
 The control plane MUST implement one of the following contention strategies and document which is in effect:
@@ -427,6 +432,7 @@ To detect T1→T2 drift, the control plane MUST record a **StateFingerprint** at
 - **Kubernetes**: `resourceVersion` of the target object at evaluation time.
 - **HTTP REST resources**: `ETag` header value.
 - **Cloud provider resources**: version ID or entity tag from the provider API.
+- **Git repositories (`git://`)**: blob SHA of the target file at the HEAD of the tracked branch. If a `GovernedResource` enrollment maps the logical target to a `git://` external ref, the blob SHA of the enrolled file is used. A changed SHA between T1 and T2 indicates the file was modified (e.g., another PR merged) and MUST trigger re-evaluation.
 - **Systems without native versioning**: SHA-256 of the fields used in policy evaluation.
 
 The StateFingerprint is recorded in `status.controlPlaneVerification.evaluatedStateFingerprint` alongside the other verified state. It is never exposed to the agent — the agent cannot forge or influence it.
@@ -475,6 +481,61 @@ When revoking an approval:
 - The `AuditRecord` MUST capture the revocation event, the reason, and the agent's response.
 
 > **Implementation Note**: The LLM component of an agent has no execution thread during tool dispatch — it is idle while the tool runs. It is therefore the **agent runtime or orchestrator** that receives the revocation signal and must act on it. Spec-compliant implementations SHOULD propagate revocation as a cancellation signal (e.g., context cancellation, workflow signals, or activity heartbeat checks) through the tool execution layer. The `Interruptibility: true` declaration by the agent is a contract with its runtime, not a guarantee of atomic abort. Orchestrators such as Temporal (via workflow signals and activity heartbeats) or LangGraph (via graph interrupts and state injection) provide suitable primitives for this.
+
+#### 3.6.4 Lock Expiry and External Side Effect Cleanup (Extended Conformance)
+
+Section 3.3 defines that when an `OpsLock` TTL expires, the lock is released and the `AgentRequest` transitions to `Failed`. This is correct for actions whose effects are immediate and observable (a Kubernetes resource update, an AWS API call). It is insufficient for actions whose effects outlive the `AgentRequest` lifecycle — specifically:
+
+- GitOps PRs that are open but not yet merged
+- Cloud resources provisioned by the agent that are still being created
+- Any long-running external operation started before the TTL elapsed
+
+When the lock expires in these cases, a second agent can now acquire the lock and act on the same resource while the first agent's PR is still open. The TTL becomes a ticking clock rather than a safety guarantee.
+
+##### Cleanup Webhook Contract
+
+Agents that perform actions with external side effects SHOULD register a `cleanup` webhook on their `AgentRequest`:
+
+```json
+"cleanup": {
+  "webhookURL": "https://agent-runtime/cleanup",
+  "onLockExpiry": true
+}
+```
+
+When an `OpsLock` TTL expires and `cleanup.onLockExpiry` is `true`, the control plane MUST:
+
+1. Transition the `AgentRequest` to `Expired` (not `Failed`).
+2. Emit an `AuditRecord` with event type `lock.expired`.
+3. POST to `cleanup.webhookURL` with the `AgentRequest` identifier and expiry reason.
+4. Wait for the agent to confirm cleanup via `POST /agent-requests/{name}/cleanup-complete`.
+5. Only release the `OpsLock` and mark the request `Failed` after cleanup confirmation is received.
+
+If cleanup is confirmed: transition to `Failed` and release the lock normally.
+
+If the agent does not confirm cleanup within a configurable `cleanupTimeoutSeconds` (default: 300):
+- The control plane MUST surface the unresolved expiry in the operator dashboard.
+- The control plane MUST emit an `AuditRecord` with event type `lock.expiry.unresolved`.
+- An SRE manually resolves the external side effect and confirms via the gateway API.
+- The control plane records the manual resolution in a subsequent `AuditRecord`.
+
+##### Cleanup Authority Principle
+
+> The control plane's cleanup authority is exactly the inverse of what it approved. No more, no less.
+
+The control plane MUST NOT directly modify external resources as part of cleanup. It orchestrates — the agent acts. This preserves the trust boundary: the control plane never needs to hold external write credentials (GitHub tokens, cloud IAM permissions) beyond what it uses for state fetching.
+
+##### Audit Requirements
+
+The `AuditRecord` for `lock.expired` MUST include:
+- The `AgentRequest` name and `agentIdentity`
+- The `target.uri` and `externalRef.uri` if applicable
+- The `OpsLock` lease name and expiry timestamp
+- Whether cleanup was confirmed automatically, confirmed manually, or remains unresolved
+
+##### Relation to Issue agent-intent-protocol#8
+
+This section directly addresses the gap identified in issue #8: OpsLock TTL expiry while GitOps PRs or cloud resources are still in flight. The cleanup webhook model ensures the lock is not prematurely released before the agent can assert that its external side effects have been reverted or completed.
 
 ### 3.7 Agent Trust Profiles (Extended Conformance)
 
@@ -549,6 +610,60 @@ A newly observed `agentIdentity` with no prior history MUST be treated conservat
 `AgentTrustProfile` updates MUST themselves be recorded as `AuditRecord` events with event type `agent.trustprofile.updated`. This ensures the profile's evolution is auditable and tamper-evident — an operator can reconstruct the full calibration history of any agent from the `AuditRecord` stream.
 
 Control planes MUST NOT allow agents to read or modify their own `AgentTrustProfile`.
+
+### 3.8 Resource Enrollment (Extended Conformance)
+
+The spec currently treats `target.uri` as a free-form string that any agent can use to identify a resource. The control plane derives everything — what state to fetch, what OpsLock key to use, what StateFingerprint to record — from the URI alone. This works when the logical resource, the state source, and the mutation target are all the same object. It breaks in GitOps environments where those three things diverge.
+
+Resource enrollment introduces an operator-controlled registry that maps logical resource identities to external system references. It is optional: implementations that do not need external system integration MAY omit it entirely.
+
+#### 3.8.1 GovernedResource
+
+A `GovernedResource` is an operator-created record that explicitly registers a resource for governance. It is owned by the control plane and cannot be created or modified by agents.
+
+A `GovernedResource` MUST contain:
+- **targetURI**: The logical resource URI — what agents use in `AgentRequest.target.uri`. Must satisfy §3.1.7.
+
+A `GovernedResource` MAY contain:
+- **externalRef**: A reference to the physical location in an external system that the control plane should use for state fetching, OpsLock acquisition, and StateFingerprint derivation. When absent, the control plane falls back to deriving everything from `targetURI` directly.
+
+```yaml
+# Example: GitOps-managed nodepool
+targetURI: k8s://cluster/default/nodepool/prod
+externalRef:
+  uri: git://github.com/org/infra-repo/config/nodepools/prod.yaml
+```
+
+When a `GovernedResource` with an `externalRef` exists for a target:
+- The control plane MUST fetch state from `externalRef.uri` for CEL policy evaluation.
+- The control plane MUST use `externalRef.uri` as the `OpsLock` key (not `targetURI`).
+- The StateFingerprint MUST be derived from the external resource (e.g., git blob SHA for `git://` URIs).
+- The `target.uri` remains the stable identifier used in policy matching, audit records, and human-readable display.
+
+The `externalRef.uri` MUST satisfy the scheme and uniqueness requirements of §3.1.7. Supported schemes are implementation-defined; `git://` is the canonical example.
+
+#### 3.8.2 Enrollment is Opt-In
+
+Enrollment MUST be optional. If no `GovernedResource` exists for a `target.uri`, the control plane MUST fall back to the existing behavior: fetch state directly from `targetURI`, acquire OpsLock on `targetURI`. This ensures backward compatibility for pure `k8s://` workflows.
+
+#### 3.8.3 Enrollment Modes
+
+The control plane SHOULD support two operator-configurable enrollment modes:
+
+- **`passthrough`** (default): AgentRequests for unenrolled resources are processed normally using `targetURI` directly. This is backward-compatible and appropriate for pure k8s environments where enrollment adds no value.
+- **`strict`**: AgentRequests for unenrolled resources are denied with code `TARGET_NOT_ENROLLED`. This enforces an explicit opt-in governance posture — operators decide what is governed rather than having governance apply implicitly to all resources. Recommended for production environments with external system integration.
+
+The enrollment mode MUST be documented by the implementation and SHOULD be configurable per namespace or globally.
+
+#### 3.8.4 Agent Transparency
+
+Agents MUST NOT be required to know whether enrollment exists for their target. An agent submitting `target.uri: k8s://default/nodepool/prod` behaves identically regardless of whether a `GovernedResource` maps that URI to a git file. The enrollment-to-externalRef lookup is purely internal to the control plane.
+
+This preserves the core governance property: the control plane independently verifies state. The agent cannot influence which state source is used.
+
+#### 3.8.5 Relation to Issue agent-intent-protocol#9
+
+This section directly addresses the gap identified in issue #9: the absence of a resource enrollment model and the missing logical→physical mapping for external system integration. The `GovernedResource` primitive is the answer to both.
 
 ## 4. Transport and API Contract
 
@@ -867,6 +982,29 @@ To ensure interoperability between independently developed agents and control pl
         "forGeneration": {
           "type": "integer",
           "description": "The EvaluationGeneration this decision was made against. The control plane MUST reject the approval if this does not match status.evaluationGeneration, preventing replay of stale approvals after a state.drifted event."
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "description": "Extended Conformance. Registers a webhook the control plane calls when the OpsLock TTL expires while external side effects may be in flight (e.g., open GitOps PR). See Section 3.6.4.",
+      "required": ["webhookURL"],
+      "properties": {
+        "webhookURL": {
+          "type": "string",
+          "format": "uri",
+          "description": "HTTPS endpoint the control plane POSTs to on lock expiry."
+        },
+        "onLockExpiry": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, the control plane transitions to Expired and calls the webhook on TTL expiry instead of transitioning directly to Failed."
+        },
+        "cleanupTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "default": 300,
+          "description": "How long the control plane waits for cleanup-complete confirmation before escalating to manual resolution."
         }
       }
     }
@@ -1326,6 +1464,48 @@ The following additional event types MUST be supported in `AuditRecord.event` wh
 | `state.drifted` | TOCTOU Protection — T1→T2 (Section 3.6.2) | Emitted when the StateFingerprint at **human approval time** differs from the fingerprint captured at policy evaluation time. The `details` field MUST include `previousFingerprint`, `currentFingerprint`, `evaluationGeneration`, and `"window": "T1T2"`. |
 | `state.drifted.verify` | TOCTOU Protection — T2→T3 (Section 4.4) | Emitted when a `/verify` call detects that the StateFingerprint has changed between human approval and the partner SDK's pre-execution check. The `details` field MUST include `previousFingerprint`, `currentFingerprint`, `evaluationGeneration`, and `"window": "T2T3"`. |
 | `agent.trustprofile.updated` | AgentTrustProfile (Section 3.7) | Emitted whenever an `AgentTrustProfile` is recalculated after a terminal `AgentRequest` transition |
+| `lock.expired` | Lock Expiry Cleanup (Section 3.6.4) | Emitted when an `OpsLock` TTL elapses and the request transitions to `Expired`. The `details` field MUST include `agentIdentity`, `targetURI`, `externalRefURI` (if applicable), `leaseName`, and `expiryTimestamp`. |
+| `lock.expiry.unresolved` | Lock Expiry Cleanup (Section 3.6.4) | Emitted when cleanup confirmation is not received within `cleanupTimeoutSeconds`. The `details` field MUST include the same fields as `lock.expired` plus `cleanupTimeoutSeconds` and `webhookURL`. |
+
+### 9.7 GovernedResource (Extended Conformance)
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GovernedResource",
+  "type": "object",
+  "required": ["apiVersion", "kind", "targetURI"],
+  "properties": {
+    "apiVersion": {
+      "type": "string",
+      "const": "aip/v1alpha1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "GovernedResource"
+    },
+    "targetURI": {
+      "type": "string",
+      "description": "The logical resource URI. MUST satisfy §3.1.7. Used by agents in AgentRequest.target.uri. Must be unique within the control plane's scope."
+    },
+    "externalRef": {
+      "type": "object",
+      "description": "Optional reference to the physical location in an external system. When present, the control plane uses this URI for state fetching, OpsLock acquisition, and StateFingerprint derivation instead of targetURI. See §3.8.",
+      "required": ["uri"],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "description": "External resource URI. MUST be scheme-prefixed (e.g., git://github.com/org/repo/path/to/file.yaml). Used as the OpsLock key and state source when present."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of what this external resource represents (e.g., 'GitOps config file for prod nodepool')."
+        }
+      }
+    }
+  }
+}
+```
 
 ## 10. Future Considerations
 
@@ -1356,6 +1536,7 @@ The [aip-k8s reference implementation](https://github.com/ravisantoshgudimetla/a
 
 Known platform conventions:
 - **Kubernetes**: See the aip-k8s reference implementation.
+- **Git repositories**: `git://github.com/<org>/<repo>/path/to/file.yaml`. Used as the `externalRef.uri` in `GovernedResource` enrollment records for GitOps-managed resources. The path component identifies the specific file whose content is fetched for CEL evaluation. The StateFingerprint for `git://` URIs is the git blob SHA of the file at HEAD of the tracked branch. Two different files in the same repository MUST have distinct URIs; they contend on separate OpsLocks.
 - **AWS**, **bare-metal**: Conventions to be documented as bindings mature.
 - **Azure**: Azure Resource Manager (ARM) paths (e.g. `/subscriptions/.../resourceGroups/...`) do not satisfy §3.1.7's scheme requirement as-is. An Azure binding MUST define a proper URI scheme (e.g. `azure://`) that wraps the ARM path rather than using the path directly.
 
